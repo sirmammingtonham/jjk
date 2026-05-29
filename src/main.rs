@@ -72,14 +72,21 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             let report = engine.branch_create(&arg.name, /*tracked=*/ true)?;
             render::print_report(&report);
         }
-        Command::Branch(BranchCmd::Delete(_)) => {
-            anyhow::bail!("`branch delete` is implemented in Phase 2");
+        Command::Branch(BranchCmd::Delete(arg)) => {
+            let report = engine.branch_delete(&arg.name)?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
         }
-        Command::Track(_) | Command::Untrack(_) => {
-            anyhow::bail!("`track`/`untrack` are implemented in Phase 2");
+        Command::Track(arg) => {
+            render::print_report(&engine.set_tracked(arg.name.as_deref(), true)?);
+        }
+        Command::Untrack(arg) => {
+            render::print_report(&engine.set_tracked(arg.name.as_deref(), false)?);
         }
         Command::Restack => {
-            anyhow::bail!("`restack` is implemented in Phase 2");
+            let report = engine.restack()?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
         }
 
         Command::Status => {

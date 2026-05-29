@@ -399,8 +399,13 @@ impl<'a> VcsTx for JjTx<'a> {
         Ok(())
     }
 
-    fn abandon(&mut self, rev: &ChangeId) -> Result<()> {
-        self.cli.run_with_stderr(&["abandon", rev.as_str()])?;
+    fn abandon(&mut self, revs: &[ChangeId]) -> Result<()> {
+        if revs.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec!["abandon"];
+        args.extend(revs.iter().map(|r| r.as_str()));
+        self.cli.run_with_stderr(&args)?;
         Ok(())
     }
 }

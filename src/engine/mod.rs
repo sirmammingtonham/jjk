@@ -378,6 +378,100 @@ impl Engine {
         Ok(report)
     }
 
+    /// `jjk restack` — ensure each upstack branch's first commit is parented on its downstack
+    /// branch's tip. Usually a **no-op** (jj already auto-rebased on every rewrite); this repairs
+    /// any drift and reports what moved.
+    pub fn restack(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let stack = self.derive_stack()?;
+
+        // (first_commit_to_rebase, destination). Computed against stable change ids.
+        let mut actions: Vec<(ChangeId, ChangeId)> = Vec::new();
+        let mut expected_parent = stack.trunk.clone();
+        for b in &stack.branches {
+            if let Some(first) = b.commits.first() {
+                if !first.parents.contains(&expected_parent) {
+                    actions.push((first.change_id.clone(), expected_parent.clone()));
+                }
+            }
+            expected_parent = b.tip.clone();
+        }
+
+        if actions.is_empty() {
+            report.note("stack already up to date (jj auto-rebases; nothing to do)");
+        } else {
+            self.vcs.transaction(&mut |tx| {
+                for (src, dest) in &actions {
+                    tx.rebase(src, dest)?;
+                }
+                Ok(())
+            })?;
+            report.note(format!("restacked {} branch(es)", actions.len()));
+        }
+        self.collect_conflicts(&mut report)?;
+        Ok(report)
+    }
+
+    /// `jjk track [NAME]` / `jjk untrack [NAME]` — toggle stack-tracking. Defaults to the current
+    /// branch. Tracking governs PR intent (only tracked branches are submitted in Phase 3).
+    pub fn set_tracked(&mut self, name: Option<&str>, tracked: bool) -> Result<Report> {
+        let mut report = Report::default();
+        let name = match name {
+            Some(n) => n.to_string(),
+            None => self.current_branch()?.ok_or(JjkError::NotOnBranch)?,
+        };
+        if name == self.state.config.trunk {
+            return Err(JjkError::IsTrunk(name).into());
+        }
+        if !self.vcs.bookmarks()?.iter().any(|b| b.name == name) {
+            return Err(JjkError::UnknownBranch(name).into());
+        }
+        self.state.branch_mut(&name).tracked = tracked;
+        self.state.save(&self.root)?;
+        report.note(format!(
+            "{} '{name}'",
+            if tracked { "tracking" } else { "untracking" }
+        ));
+        Ok(report)
+    }
+
+    /// `jjk branch delete NAME` — drop the branch and heal the gap: abandon its commit range so the
+    /// upstack auto-reconnects to NAME's parent (downstack branch tip or trunk). (PR close: Phase 3.)
+    pub fn branch_delete(&mut self, name: &str) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        if name == self.state.config.trunk {
+            return Err(JjkError::IsTrunk(name.to_string()).into());
+        }
+        let stack = self.derive_stack()?;
+        let branch = stack
+            .branch(name)
+            .ok_or_else(|| JjkError::UnknownBranch(name.to_string()))?;
+        let range: Vec<ChangeId> = branch.commits.iter().map(|c| c.change_id.clone()).collect();
+        let had_upstack = stack.upstack(name).is_some();
+
+        self.vcs.transaction(&mut |tx| {
+            tx.abandon(&range)?; // abandons the range (deletes the bookmark) + auto-rebases upstack
+            Ok(())
+        })?;
+
+        // Defensive: if a bookmark somehow survived (e.g. it wasn't on the abandoned tip), drop it.
+        if self.vcs.bookmarks()?.iter().any(|b| b.name == name) {
+            let n = name.to_string();
+            self.vcs.transaction(&mut |tx| tx.delete_bookmark(&n))?;
+        }
+
+        self.state.branches.remove(name);
+        self.state.save(&self.root)?;
+        report.note(format!("deleted branch '{name}'"));
+        if had_upstack {
+            report.note("upstack reconnected to its parent");
+        }
+        self.collect_conflicts(&mut report)?;
+        Ok(report)
+    }
+
     /// `jjk undo` — expose jj's op-log undo.
     pub fn undo(&mut self) -> Result<Report> {
         let mut report = Report::default();

@@ -29,10 +29,10 @@ pub enum Command {
     #[command(subcommand)]
     Branch(BranchCmd),
 
-    /// Convert a branch to tracked.
-    Track(NameArg),
-    /// Convert a branch to untracked.
-    Untrack(NameArg),
+    /// Convert a branch to tracked (defaults to the current branch).
+    Track(OptNameArg),
+    /// Convert a branch to untracked (defaults to the current branch).
+    Untrack(OptNameArg),
 
     /// Working-copy status with stack position.
     Status,
@@ -115,4 +115,9 @@ pub enum BranchCmd {
 #[derive(Args, Debug)]
 pub struct NameArg {
     pub name: String,
+}
+
+#[derive(Args, Debug)]
+pub struct OptNameArg {
+    pub name: Option<String>,
 }

@@ -101,6 +101,7 @@ pub trait VcsTx {
     /// `jj rebase -s <source> -d <dest>`: rebase source and descendants onto dest.
     fn rebase(&mut self, source: &ChangeId, dest: &ChangeId) -> Result<()>;
 
-    /// `jj abandon <rev>`: abandon the commit; descendants auto-rebase onto its parent.
-    fn abandon(&mut self, rev: &ChangeId) -> Result<()>;
+    /// `jj abandon <revs...>`: abandon the commits in one op; descendants auto-rebase onto the
+    /// abandoned range's parent. Bookmarks on abandoned commits are deleted (JJ_NOTES §2).
+    fn abandon(&mut self, revs: &[ChangeId]) -> Result<()>;
 }
