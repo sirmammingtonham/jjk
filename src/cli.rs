@@ -74,8 +74,14 @@ pub enum Command {
     Pull,
     /// Push the current branch.
     Push,
-    /// Create/update PRs for the stack (bottom-up, correctly based).
+    /// Create/update PRs for the whole stack (bottom-up, correctly based).
     Submit,
+    /// Submit the current branch and everything above it.
+    #[command(subcommand)]
+    Upstack(UpstackCmd),
+    /// Submit the current branch and everything below it.
+    #[command(subcommand)]
+    Downstack(DownstackCmd),
     /// Fetch trunk, reconcile merged branches, rebase the stack, then push & retarget PRs.
     Sync(SyncArgs),
 
@@ -137,6 +143,20 @@ pub enum BranchCmd {
     Squash(MessageArg),
     /// Fold the current branch into its downstack base.
     Fold,
+    /// Create/update the PR for just the current branch.
+    Submit,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum UpstackCmd {
+    /// Submit the current branch and everything above it.
+    Submit,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DownstackCmd {
+    /// Submit the current branch and everything below it.
+    Submit,
 }
 
 #[derive(Args, Debug)]

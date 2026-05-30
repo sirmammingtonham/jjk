@@ -104,7 +104,7 @@ async fn run_body(engine: &mut Engine, root: &Path, a: &str, b: &str) -> anyhow:
     write(root, &format!("{b}.txt"), "bravo\n");
     engine.commit(&format!("{b}: bravo"))?;
 
-    engine.submit().await?;
+    engine.submit(jjk::engine::SubmitScope::Stack).await?;
     let gh = GhCli::new(Some(SLUG.to_string()));
     let pa = gh.get_pr(a).await?.expect("PR a");
     let pb = gh.get_pr(b).await?.expect("PR b");

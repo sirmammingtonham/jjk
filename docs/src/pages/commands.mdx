@@ -53,7 +53,9 @@ description: Every jjk command at a glance.
 | `jjk fetch` | Fetch from the remote. |
 | `jjk pull` | Fetch trunk and rebase the current stack onto it (no merged-PR detection, no push). |
 | `jjk push` | Push the current branch (force-with-lease). |
-| `jjk submit` | Push the stack and create/update a PR per branch, each based on the one below it. Idempotent; updates the stack-navigation comment. |
+| `jjk submit` | Push the whole stack and create/update a PR per branch, each based on the one below it. Idempotent; updates the stack-navigation comment. |
+| `jjk branch submit` | Submit just the current branch's PR. |
+| `jjk upstack submit` / `jjk downstack submit` | Submit only the current branch and everything above / below it. Bases still point at each branch's real downstack branch. |
 | `jjk sync` | Fetch, reconcile merged PRs, rebase survivors onto trunk, force-push, and retarget PR bases. Handles squash- and merge-commit landings. |
 | `jjk sync -n` / `--no-push` | Reconcile local state only (fetch, drop merged branches, rebase onto trunk). Doesn't push branches or retarget PRs. Faster, and safe when you're not ready to touch the remote. |
 

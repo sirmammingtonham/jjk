@@ -3,8 +3,10 @@
 
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
-use jjk::cli::{BranchCmd, Cli, Command, RepoCmd, StashAction, WorktreeCmd};
-use jjk::engine::{Engine, NavDir};
+use jjk::cli::{
+    BranchCmd, Cli, Command, DownstackCmd, RepoCmd, StashAction, UpstackCmd, WorktreeCmd,
+};
+use jjk::engine::{Engine, NavDir, SubmitScope};
 use jjk::render;
 use std::process::ExitCode;
 
@@ -125,6 +127,15 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         Command::Branch(BranchCmd::Fold) => {
             render::print_report(&engine.branch_fold()?);
         }
+        Command::Branch(BranchCmd::Submit) => {
+            render::print_report(&engine.submit(SubmitScope::Branch).await?);
+        }
+        Command::Upstack(UpstackCmd::Submit) => {
+            render::print_report(&engine.submit(SubmitScope::Upstack).await?);
+        }
+        Command::Downstack(DownstackCmd::Submit) => {
+            render::print_report(&engine.submit(SubmitScope::Downstack).await?);
+        }
         Command::Track(arg) => {
             render::print_report(&engine.set_tracked(arg.name.as_deref(), true)?);
         }
@@ -208,7 +219,7 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             render::print_report(&report);
         }
         Command::Submit => {
-            let report = engine.submit().await?;
+            let report = engine.submit(SubmitScope::Stack).await?;
             render::print_report(&report);
         }
         Command::Sync(args) => {

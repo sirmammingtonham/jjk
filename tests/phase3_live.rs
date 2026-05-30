@@ -134,7 +134,7 @@ async fn run_body(
     engine.commit(&format!("{c}: charlie"))?;
 
     // Submit: 3 PRs, based bottom-up.
-    let r1 = engine.submit().await?;
+    let r1 = engine.submit(jjk::engine::SubmitScope::Stack).await?;
     eprintln!("submit #1:\n{}", r1.notes.join("\n"));
 
     let gh = GhCli::new(Some(slug()));
@@ -149,7 +149,7 @@ async fn run_body(
     // Edit + re-submit: idempotent (no new PRs, same numbers, bases intact).
     write(root, "a.txt", "alpha edited\n");
     engine.commit(&format!("{a}: edit"))?;
-    let r2 = engine.submit().await?;
+    let r2 = engine.submit(jjk::engine::SubmitScope::Stack).await?;
     eprintln!("submit #2:\n{}", r2.notes.join("\n"));
 
     let pa2 = gh.get_pr(a).await?.expect("PR for a still there");

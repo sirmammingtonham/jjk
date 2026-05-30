@@ -989,23 +989,25 @@ impl Engine {
 
     /// `jjk submit` — push tracked branches bottom-up and create/update their PRs with correct
     /// bases (downstack tracked branch, or trunk for the bottom). Idempotent.
-    pub async fn submit(&mut self) -> Result<Report> {
+    pub async fn submit(&mut self, scope: SubmitScope) -> Result<Report> {
         let mut report = Report::default();
         self.ensure_fresh(&mut report)?;
         let stack = self.derive_stack()?;
         let remote = self.state.config.remote.clone();
         let trunk_name = stack.trunk_name.clone();
 
-        // Build an owned plan (name, base, title, body) for tracked branches, bottom→top.
+        // Full tracked list (bottom→top) with correct bases. Bases come from the *whole* stack —
+        // a subset submit still bases each PR on its real downstack branch, not the subset.
         struct Item {
             name: String,
             base: String,
             title: String,
             body: String,
         }
+        let tracked: Vec<&Branch> = stack.branches.iter().filter(|b| b.tracked).collect();
         let mut plan: Vec<Item> = Vec::new();
         let mut prev_tracked: Option<String> = None;
-        for b in stack.branches.iter().filter(|b| b.tracked) {
+        for b in &tracked {
             let base = prev_tracked.clone().unwrap_or_else(|| trunk_name.clone());
             let title = b
                 .commits
@@ -1013,42 +1015,43 @@ impl Engine {
                 .map(|c| c.subject().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| b.name.clone());
-            let body = pr_body(b, &base);
             plan.push(Item {
                 name: b.name.clone(),
-                base,
+                base: base.clone(),
                 title,
-                body,
+                body: pr_body(b, &base),
             });
             prev_tracked = Some(b.name.clone());
         }
-        drop(stack);
 
         if plan.is_empty() {
             report.note("no tracked branches to submit");
             return Ok(report);
         }
 
-        // 1. Push every tracked branch (bottom-up) so the remote has the heads + bases.
-        for item in &plan {
-            self.vcs.push(&remote, &item.name, PushOpts::default())?;
-        }
-        report.note(format!("pushed {} branch(es)", plan.len()));
+        // Which indices to submit, per scope (relative to the current branch).
+        let cur_idx = stack
+            .current
+            .as_ref()
+            .and_then(|c| plan.iter().position(|i| &i.name == c));
+        let to_submit: Vec<usize> = match scope {
+            SubmitScope::Stack => (0..plan.len()).collect(),
+            SubmitScope::Branch => vec![cur_idx.ok_or(JjkError::NotOnBranch)?],
+            SubmitScope::Upstack => (cur_idx.ok_or(JjkError::NotOnBranch)?..plan.len()).collect(),
+            SubmitScope::Downstack => (0..=cur_idx.ok_or(JjkError::NotOnBranch)?).collect(),
+        };
+        drop(stack);
 
-        // 2. Create or update each PR, bottom-up. get_pr (by head branch) makes this idempotent
-        // even if state.toml is missing the PR number. Collect (branch, pr#) for the nav comment.
-        let mut stack_prs: Vec<(String, u64)> = Vec::new();
-        for item in &plan {
-            let existing = self.forge()?.get_pr(&item.name).await?;
-            let number = match existing {
+        // Push + create/update the in-scope branches. get_pr (by head) keeps it idempotent.
+        for &i in &to_submit {
+            let item = &plan[i];
+            self.vcs.push(&remote, &item.name, PushOpts::default())?;
+            let number = match self.forge()?.get_pr(&item.name).await? {
                 Some(pr) => {
                     self.forge()?
                         .update_pr(pr.number, Some(&item.base), Some(&item.body))
                         .await?;
-                    report.note(format!(
-                        "updated #{} {} (base {})",
-                        pr.number, item.name, item.base
-                    ));
+                    report.note(format!("updated #{} {} (base {})", pr.number, item.name, item.base));
                     pr.number
                 }
                 None => {
@@ -1056,19 +1059,20 @@ impl Engine {
                         .forge()?
                         .create_pr(&item.name, &item.base, &item.title, &item.body)
                         .await?;
-                    report.note(format!(
-                        "created #{} {} (base {})",
-                        pr.number, item.name, item.base
-                    ));
+                    report.note(format!("created #{} {} (base {})", pr.number, item.name, item.base));
                     pr.number
                 }
             };
             self.state.branch_mut(&item.name).pr = Some(number);
-            stack_prs.push((item.name.clone(), number));
         }
         self.state.save(&self.root)?;
 
-        // 3. Upsert the stack-navigation comment on each PR (idempotent via the marker).
+        // Upsert the stack-navigation comment across the whole stack (all tracked branches that now
+        // have a PR), so it stays accurate even after a subset submit.
+        let stack_prs: Vec<(String, u64)> = plan
+            .iter()
+            .filter_map(|i| self.state.pr_of(&i.name).map(|pr| (i.name.clone(), pr)))
+            .collect();
         if stack_prs.len() >= 2 {
             for (idx, (_, pr)) in stack_prs.iter().enumerate() {
                 let body = nav_comment_body(&stack_prs, idx);
@@ -1252,6 +1256,19 @@ pub enum NavDir {
     Down,
     Top,
     Bottom,
+}
+
+/// Which branches `submit` operates on, relative to the current branch.
+#[derive(Clone, Copy, Debug)]
+pub enum SubmitScope {
+    /// The whole stack (default `jjk submit`).
+    Stack,
+    /// Only the current branch.
+    Branch,
+    /// The current branch and everything above it.
+    Upstack,
+    /// The current branch and everything below it.
+    Downstack,
 }
 
 /// A row for `jjk worktree list`.

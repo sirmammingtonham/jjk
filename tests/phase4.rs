@@ -66,7 +66,7 @@ async fn sync_after_squash_merge_of_bottom() {
 
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
-    h.engine.submit().await.unwrap();
+    h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
 
     // Simulate a SQUASH-merge of feat-a: a new commit on main carrying feat-a's content.
     let work = clone_remote(&h);
@@ -102,7 +102,7 @@ async fn sync_after_merge_commit_of_bottom() {
 
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
-    h.engine.submit().await.unwrap();
+    h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
 
     // Simulate a MERGE-COMMIT landing of feat-a: real merge of origin/feat-a into main.
     let work = clone_remote(&h);
@@ -139,7 +139,7 @@ async fn sync_with_no_merges_is_safe() {
     build_two_branch_stack(&mut h);
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
-    h.engine.submit().await.unwrap();
+    h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
 
     // Nothing merged: sync should be a safe no-op on the stack shape.
     let report = h.engine.sync(true).await.unwrap();
@@ -166,7 +166,7 @@ async fn sync_reports_conflict_without_aborting() {
 
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
-    h.engine.submit().await.unwrap();
+    h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
 
     // Squash-land feat-a with DIFFERENT content than feat-a had, so feat-b's edit conflicts.
     let work = clone_remote(&h);
@@ -269,7 +269,7 @@ async fn sync_no_push_reconciles_locally_without_pushing() {
     build_two_branch_stack(&mut h);
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
-    h.engine.submit().await.unwrap();
+    h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
 
     // Squash-merge feat-a on the remote.
     let work = clone_remote(&h);
