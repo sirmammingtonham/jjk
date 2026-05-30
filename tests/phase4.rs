@@ -77,7 +77,7 @@ async fn sync_after_squash_merge_of_bottom() {
     git(work.path(), &["push", "origin", "main"]);
     fake.set_merged("feat-a");
 
-    let report = h.engine.sync().await.unwrap();
+    let report = h.engine.sync(true).await.unwrap();
     assert!(report.conflicts.is_empty(), "no conflicts: {:?}", report.conflicts);
 
     let stack = h.engine.derive_stack().unwrap();
@@ -114,7 +114,7 @@ async fn sync_after_merge_commit_of_bottom() {
     git(work.path(), &["push", "origin", "main"]);
     fake.set_merged("feat-a");
 
-    let report = h.engine.sync().await.unwrap();
+    let report = h.engine.sync(true).await.unwrap();
     assert!(report.conflicts.is_empty(), "no conflicts: {:?}", report.conflicts);
 
     let stack = h.engine.derive_stack().unwrap();
@@ -142,7 +142,7 @@ async fn sync_with_no_merges_is_safe() {
     h.engine.submit().await.unwrap();
 
     // Nothing merged: sync should be a safe no-op on the stack shape.
-    let report = h.engine.sync().await.unwrap();
+    let report = h.engine.sync(true).await.unwrap();
     assert!(report.notes.iter().any(|n| n.contains("no merged")));
     let stack = h.engine.derive_stack().unwrap();
     let names: Vec<_> = stack.branches.iter().map(|b| b.name.as_str()).collect();
@@ -178,7 +178,7 @@ async fn sync_reports_conflict_without_aborting() {
     fake.set_merged("feat-a");
 
     // Must not error — conflicts are reported, not fatal.
-    let report = h.engine.sync().await.unwrap();
+    let report = h.engine.sync(true).await.unwrap();
     assert!(
         !report.conflicts.is_empty(),
         "sync should surface the conflict, got notes {:?}",
@@ -240,7 +240,7 @@ async fn sync_with_branch_stacked_on_merged_immutable_commits() {
     assert_eq!(stack.branch("feat-new").unwrap().commit_count(), 1, "no immutable commits in range");
 
     // sync must complete (not crash on immutable commits) and rebase feat-new straight onto trunk.
-    h.engine.sync().await.unwrap();
+    h.engine.sync(true).await.unwrap();
 
     let after = h.engine.derive_stack().unwrap();
     let feat_new = after.branch("feat-new").unwrap();
@@ -249,5 +249,61 @@ async fn sync_with_branch_stacked_on_merged_immutable_commits() {
         "feat-new should be rebased directly onto trunk (parents {:?}, trunk {:?})",
         feat_new.commits[0].parents,
         after.trunk
+    );
+}
+
+/// rev-parse a branch on the bare remote (to verify pushes / non-pushes).
+fn remote_sha(bare: &Path, branch: &str) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(bare)
+        .args(["rev-parse", &format!("refs/heads/{branch}")])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn sync_no_push_reconciles_locally_without_pushing() {
+    let mut h = setup_with_remote();
+    build_two_branch_stack(&mut h);
+    let fake = Arc::new(FakeForge::new());
+    h.engine.set_forge(Box::new(SharedForge(fake.clone())));
+    h.engine.submit().await.unwrap();
+
+    // Squash-merge feat-a on the remote.
+    let work = clone_remote(&h);
+    git(work.path(), &["checkout", "main"]);
+    write(work.path(), "a.txt", "alpha\n");
+    git(work.path(), &["add", "a.txt"]);
+    git(work.path(), &["commit", "-m", "feat-a (squash)"]);
+    git(work.path(), &["push", "origin", "main"]);
+    fake.set_merged("feat-a");
+
+    let bare = h.remote.path().join("origin.git");
+    let feat_b_before = remote_sha(&bare, "feat-b");
+
+    // --no-push: reconcile local state only.
+    let report = h.engine.sync(false).await.unwrap();
+    assert!(
+        report.notes.iter().any(|n| n.contains("local state only")),
+        "should note it skipped pushing: {:?}",
+        report.notes
+    );
+
+    // Local reconciliation DID happen: feat-a dropped, feat-b rebased onto trunk.
+    let stack = h.engine.derive_stack().unwrap();
+    assert_eq!(
+        stack.branches.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+        ["feat-b"]
+    );
+    assert!(stack.branch("feat-b").unwrap().commits[0].parents.contains(&stack.trunk));
+
+    // But nothing was pushed and no PR was retargeted.
+    assert_eq!(remote_sha(&bare, "feat-b"), feat_b_before, "feat-b must NOT be force-pushed");
+    assert_eq!(
+        fake.pr_for("feat-b").unwrap().base,
+        "feat-a",
+        "PR base must NOT be retargeted in --no-push mode"
     );
 }

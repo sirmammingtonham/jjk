@@ -101,8 +101,12 @@ jjk sync
 The result is clean upstack diffs, with no duplicated or garbled content, regardless of how the
 bottom PR landed.
 
-`jjk pull` is the lighter cousin. It fetches and rebases the stack onto trunk, but does no merged-PR
-detection and no push.
+To reconcile your local state without touching the remote, use `jjk sync -n` (`--no-push`): it
+fetches, drops merged branches, and rebases the stack onto trunk, but doesn't force-push or retarget
+PRs. Handy after a teammate merges something, when you're not yet ready to update your own PRs.
+
+`jjk pull` is the even lighter cousin. It fetches and rebases the stack onto trunk, but does no
+merged-PR detection and no push.
 
 ## Conflicts
 

@@ -74,8 +74,8 @@ pub enum Command {
     Push,
     /// Create/update PRs for the stack (bottom-up, correctly based).
     Submit,
-    /// Pull trunk and reconcile merged branches.
-    Sync,
+    /// Fetch trunk, reconcile merged branches, rebase the stack, then push & retarget PRs.
+    Sync(SyncArgs),
 
     /// The friendly "no staging area needed" note (D1).
     Add,
@@ -153,6 +153,14 @@ pub struct WorktreeAddArgs {
     /// Start the workspace on this branch's tip (default: trunk).
     #[arg(long)]
     pub branch: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct SyncArgs {
+    /// Reconcile local state only (fetch, drop merged branches, rebase onto trunk); don't push
+    /// branches or retarget PRs. Faster, and safe when you're not ready to update the remote.
+    #[arg(short = 'n', long)]
+    pub no_push: bool,
 }
 
 #[derive(Args, Debug)]

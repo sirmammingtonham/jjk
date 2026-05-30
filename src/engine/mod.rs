@@ -938,10 +938,12 @@ fn nav_comment_body(prs: &[(String, u64)], current_idx: usize) -> String {
 }
 
 impl Engine {
-    /// `jjk sync` — fetch trunk, reconcile merged branches, rebase the survivors, force-push and
-    /// retarget their PR bases (ARCHITECTURE §6). Landing-method agnostic (JJ_NOTES §9): squash and
-    /// merge-commit are both handled by the `roots(trunk()..top)` rebase + empty/immutable handling.
-    pub async fn sync(&mut self) -> Result<Report> {
+    /// `jjk sync` — fetch trunk, reconcile merged branches, rebase the survivors, and (when `push`)
+    /// force-push and retarget their PR bases (ARCHITECTURE §6). Landing-method agnostic (JJ_NOTES
+    /// §9): squash and merge-commit are both handled by the `roots(trunk()..top)` rebase +
+    /// empty/immutable handling. With `push = false`, only local state is reconciled (no force-push,
+    /// no PR retarget, no remote deletions).
+    pub async fn sync(&mut self, push: bool) -> Result<Report> {
         let mut report = Report::default();
 
         // 1. Capture branch→PR BEFORE fetching: a merge-commit landing absorbs the merged branch
@@ -1008,49 +1010,53 @@ impl Engine {
             report.note("recovered stale working copy");
         }
 
-        // 6 + 7. Force-push survivors and retarget their PR bases bottom-up.
-        let remote = self.state.config.remote.clone();
-        let survivors = self.derive_stack()?;
-        let trunk_name = survivors.trunk_name.clone();
-        let mut prev_tracked: Option<String> = None;
-        let mut pushed = 0usize;
-        for b in survivors.branches.iter().filter(|b| b.tracked) {
-            // A conflicted commit cannot be pushed; skip and report (D4 — don't abort).
-            if b.has_conflict() {
-                report.note(format!(
-                    "skipped '{}' — has conflicts; resolve then re-run `jjk sync`",
-                    b.name
-                ));
-                prev_tracked = Some(b.name.clone());
-                continue;
-            }
-            self.vcs.push(&remote, &b.name, PushOpts::default())?;
-            pushed += 1;
-            if let Some(pr) = b.pr {
-                let base = prev_tracked.clone().unwrap_or_else(|| trunk_name.clone());
-                // Retarget best-effort: a dependent PR may have been closed by GitHub when its base
-                // branch was deleted on merge — you can't retarget a closed PR, so report instead.
-                match self.forge()?.get_pr(&b.name).await? {
-                    Some(p) if p.state == PrState::Open => {
-                        self.forge()?.update_pr(pr, Some(&base), None).await?;
-                        report.note(format!("#{pr} {} → base {base}", b.name));
-                    }
-                    Some(p) => report.note(format!(
-                        "#{pr} {} is {}; not retargeting (reopen it to restack the PR)",
-                        b.name, p.state
-                    )),
-                    None => report.note(format!("{}: PR not found; skipping retarget", b.name)),
+        // 6 + 7. Force-push survivors and retarget their PR bases bottom-up. Skipped with --no-push,
+        // which reconciles local state only (no force-push, no PR retarget, no remote deletions).
+        if !push {
+            report.note("synced local state only (--no-push); run `jjk sync` to push & retarget");
+        } else {
+            let remote = self.state.config.remote.clone();
+            let survivors = self.derive_stack()?;
+            let trunk_name = survivors.trunk_name.clone();
+            let mut prev_tracked: Option<String> = None;
+            let mut pushed = 0usize;
+            for b in survivors.branches.iter().filter(|b| b.tracked) {
+                // A conflicted commit cannot be pushed; skip and report (D4 — don't abort).
+                if b.has_conflict() {
+                    report.note(format!(
+                        "skipped '{}' — has conflicts; resolve then re-run `jjk sync`",
+                        b.name
+                    ));
+                    prev_tracked = Some(b.name.clone());
+                    continue;
                 }
+                self.vcs.push(&remote, &b.name, PushOpts::default())?;
+                pushed += 1;
+                if let Some(pr) = b.pr {
+                    let base = prev_tracked.clone().unwrap_or_else(|| trunk_name.clone());
+                    // Retarget best-effort: a dependent PR may have been closed by GitHub when its
+                    // base branch was deleted on merge — you can't retarget a closed PR, so report.
+                    match self.forge()?.get_pr(&b.name).await? {
+                        Some(p) if p.state == PrState::Open => {
+                            self.forge()?.update_pr(pr, Some(&base), None).await?;
+                            report.note(format!("#{pr} {} → base {base}", b.name));
+                        }
+                        Some(p) => report.note(format!(
+                            "#{pr} {} is {}; not retargeting (reopen it to restack the PR)",
+                            b.name, p.state
+                        )),
+                        None => report.note(format!("{}: PR not found; skipping retarget", b.name)),
+                    }
+                }
+                prev_tracked = Some(b.name.clone());
             }
-            prev_tracked = Some(b.name.clone());
-        }
-        if pushed > 0 {
-            report.note(format!("force-pushed {pushed} surviving branch(es)"));
-        }
-
-        // Best-effort: propagate merged-branch deletions to the remote.
-        if !merged_names.is_empty() {
-            let _ = self.vcs.push_deleted(&remote);
+            if pushed > 0 {
+                report.note(format!("force-pushed {pushed} surviving branch(es)"));
+            }
+            // Best-effort: propagate merged-branch deletions to the remote.
+            if !merged_names.is_empty() {
+                let _ = self.vcs.push_deleted(&remote);
+            }
         }
 
         self.state.save(&self.root)?;

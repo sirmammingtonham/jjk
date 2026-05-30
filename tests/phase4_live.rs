@@ -130,7 +130,7 @@ async fn run_body(engine: &mut Engine, root: &Path, a: &str, b: &str) -> anyhow:
     eprintln!("squash-merged #{}", pa.number);
 
     // Sync: reconcile the merged bottom, rebase + retarget the survivor.
-    let report = engine.sync().await?;
+    let report = engine.sync(true).await?;
     eprintln!("sync:\n{}", report.notes.join("\n"));
     anyhow::ensure!(report.conflicts.is_empty(), "unexpected conflicts: {:?}", report.conflicts);
 

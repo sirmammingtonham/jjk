@@ -184,8 +184,8 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             let report = engine.submit().await?;
             render::print_report(&report);
         }
-        Command::Sync => {
-            let report = engine.sync().await?;
+        Command::Sync(args) => {
+            let report = engine.sync(/*push=*/ !args.no_push).await?;
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
         }
