@@ -71,6 +71,12 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
 
     match command {
         Command::Commit(args) => {
+            // Run the git pre-commit hook (git semantics) for paths that commit working changes,
+            // unless --no-verify. Restructuring paths (--split/--pick) don't take new content.
+            let runs_hook = args.fixup.is_some() || args.amend || (!args.split && args.pick.is_none());
+            if runs_hook && !args.no_verify {
+                engine.run_pre_commit()?;
+            }
             let report = if let Some(target) = args.fixup.as_deref() {
                 engine.commit_fixup(target)?
             } else if args.split {

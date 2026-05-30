@@ -122,6 +122,9 @@ pub struct CommitArgs {
     /// Copy a commit (e.g. from an upstack branch) onto the current branch.
     #[arg(long, value_name = "REV")]
     pub pick: Option<String>,
+    /// Skip the git pre-commit hook.
+    #[arg(short = 'n', long)]
+    pub no_verify: bool,
 }
 
 #[derive(Args, Debug)]

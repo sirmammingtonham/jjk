@@ -312,6 +312,12 @@ impl Engine {
 
     // ---------------------------------------------------------------- local commands
 
+    /// Run the git `pre-commit` hook (git semantics): blocks the commit if it fails. Callers skip
+    /// this when `--no-verify` is given.
+    pub fn run_pre_commit(&self) -> Result<()> {
+        self.vcs.run_pre_commit_hook()
+    }
+
     /// `jjk commit -m M` — the commit algorithm (ARCH §3.3).
     pub fn commit(&mut self, message: &str) -> Result<Report> {
         let mut report = Report::default();

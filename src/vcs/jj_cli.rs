@@ -163,6 +163,19 @@ impl JjCli {
     }
 }
 
+/// Whether `path` is an executable file (git only runs hooks that are executable).
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
 /// Parse one tab-separated record produced by [`COMMIT_TEMPLATE`].
 fn parse_commit(line: &str) -> Result<CommitInfo> {
     let f: Vec<&str> = line.splitn(NUM_FIELDS, '\t').collect();
@@ -372,6 +385,43 @@ impl Vcs for JjCli {
 
     fn push_deleted(&self, remote: &str) -> Result<()> {
         self.run_with_stderr(&["git", "push", "--remote", remote, "--deleted"])?;
+        Ok(())
+    }
+
+    fn run_pre_commit_hook(&self) -> Result<()> {
+        // Resolve the hook path, honouring core.hooksPath and the git-dir location.
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["rev-parse", "--git-path", "hooks/pre-commit"])
+            .output()
+            .context("failed to spawn `git`")?;
+        if !out.status.success() {
+            return Ok(()); // not a git repo / can't resolve — nothing to run
+        }
+        let rel = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let hook = self.root.join(rel);
+        if !is_executable(&hook) {
+            return Ok(());
+        }
+        // Stage the working changes so index-based hooks (`git diff --cached`) see them. jj reads
+        // the working tree, not the index, so this doesn't affect the commit jj will make.
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["add", "-A"])
+            .output();
+        // Run the hook from the repo root, inheriting the terminal.
+        let status = Command::new(&hook)
+            .current_dir(&self.root)
+            .status()
+            .with_context(|| format!("failed to run pre-commit hook {}", hook.display()))?;
+        if !status.success() {
+            return Err(anyhow!(
+                "pre-commit hook failed (exit {}); commit `--no-verify`/`-n` to skip",
+                status.code().unwrap_or(-1)
+            ));
+        }
         Ok(())
     }
 

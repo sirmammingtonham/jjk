@@ -80,6 +80,12 @@ pub trait Vcs {
     fn push(&self, remote: &str, bookmark: &str, opts: PushOpts) -> Result<()>;
     /// Push all pending bookmark deletions to the remote (`jj git push --deleted`).
     fn push_deleted(&self, remote: &str) -> Result<()>;
+    /// Run the git `pre-commit` hook (respecting `core.hooksPath`) the way `git commit` would:
+    /// stage the working changes so index-based hooks see them, then run the hook with the
+    /// terminal. Returns `Err` if the hook exits non-zero; `Ok` if it passes or there is no
+    /// executable hook.
+    fn run_pre_commit_hook(&self) -> Result<()>;
+
     fn add_remote(&self, name: &str, url: &str) -> Result<()>;
     /// Names of configured remotes (excludes the colocated `git` pseudo-remote).
     fn remotes(&self) -> Result<Vec<String>>;

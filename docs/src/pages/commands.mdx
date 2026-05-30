@@ -17,7 +17,7 @@ description: Every jjk command at a glance.
 
 | Command | What it does |
 | --- | --- |
-| `jjk commit -m <msg>` | Commit **all** current changes (no staging area). Mid-stack commits auto-restack the upstack. |
+| `jjk commit -m <msg>` | Commit **all** current changes (no staging area). Runs the git `pre-commit` hook (`-n`/`--no-verify` to skip). Mid-stack commits auto-restack the upstack. |
 | `jjk commit --amend [-m <msg>]` | Amend the current branch's tip; descendants auto-rebase. |
 | `jjk commit --fixup <branch>` | Fold the working-copy changes into `<branch>`'s tip (an older commit downstack); descendants auto-rebase. |
 | `jjk commit --split` | Split the branch tip into two commits (interactive diff editor). |
