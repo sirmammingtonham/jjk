@@ -10,7 +10,7 @@
 model. jj does the hard parts: automatic rebasing, first-class conflicts, stable change identity, and
 instant undo.
 
-📖 **[Documentation](https://sirmammingtonham.github.io/jjk/)**
+📖 **[Documentation](https://ethan.website/jjk/)**
 
 ```
 🥞 jjk ls
@@ -48,7 +48,7 @@ jj config set --user user.email "you@example.com"
 cargo install --path .
 ```
 
-See the [installation guide](https://sirmammingtonham.github.io/jjk/installation) for details.
+See the [installation guide](https://ethan.website/jjk/installation) for details.
 
 ## Usage
 
@@ -65,9 +65,9 @@ jjk submit                          # open a stacked PR per branch
 jjk sync                            # reconcile, rebase, retarget, push
 ```
 
-The [quickstart](https://sirmammingtonham.github.io/jjk/quickstart) and
-[workflow guide](https://sirmammingtonham.github.io/jjk/workflow) walk through the full loop, and the
-[command reference](https://sirmammingtonham.github.io/jjk/commands) lists everything.
+The [quickstart](https://ethan.website/jjk/quickstart) and
+[workflow guide](https://ethan.website/jjk/workflow) walk through the full loop, and the
+[command reference](https://ethan.website/jjk/commands) lists everything.
 
 ## Contributing
 

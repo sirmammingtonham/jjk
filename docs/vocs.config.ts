@@ -5,8 +5,7 @@ export default defineConfig({
   titleTemplate: '%s – jjk',
   description:
     'Familiar git commands and a stacking workflow over Jujutsu (jj) for painless stacked GitHub PRs.',
-  // GitHub Pages serves the repo at https://sirmammingtonham.github.io/jjk/
-  baseUrl: 'https://sirmammingtonham.github.io/jjk',
+  baseUrl: 'https://ethan.website/jjk',
   basePath: '/jjk',
   // Pure static bundle (no server runtime) for GitHub Pages.
   renderStrategy: 'full-static',
