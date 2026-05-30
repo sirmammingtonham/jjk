@@ -833,36 +833,73 @@ impl Engine {
         report.note(format!("pushed {} branch(es)", plan.len()));
 
         // 2. Create or update each PR, bottom-up. get_pr (by head branch) makes this idempotent
-        // even if state.toml is missing the PR number.
+        // even if state.toml is missing the PR number. Collect (branch, pr#) for the nav comment.
+        let mut stack_prs: Vec<(String, u64)> = Vec::new();
         for item in &plan {
             let existing = self.forge()?.get_pr(&item.name).await?;
-            match existing {
+            let number = match existing {
                 Some(pr) => {
                     self.forge()?
                         .update_pr(pr.number, Some(&item.base), Some(&item.body))
                         .await?;
-                    self.state.branch_mut(&item.name).pr = Some(pr.number);
                     report.note(format!(
                         "updated #{} {} (base {})",
                         pr.number, item.name, item.base
                     ));
+                    pr.number
                 }
                 None => {
                     let pr = self
                         .forge()?
                         .create_pr(&item.name, &item.base, &item.title, &item.body)
                         .await?;
-                    self.state.branch_mut(&item.name).pr = Some(pr.number);
                     report.note(format!(
                         "created #{} {} (base {})",
                         pr.number, item.name, item.base
                     ));
+                    pr.number
                 }
-            }
+            };
+            self.state.branch_mut(&item.name).pr = Some(number);
+            stack_prs.push((item.name.clone(), number));
         }
         self.state.save(&self.root)?;
+
+        // 3. Upsert the stack-navigation comment on each PR (idempotent via the marker).
+        if stack_prs.len() >= 2 {
+            for (idx, (_, pr)) in stack_prs.iter().enumerate() {
+                let body = nav_comment_body(&stack_prs, idx);
+                match self.forge()?.find_comment(*pr, NAV_MARKER).await? {
+                    Some(cid) => self.forge()?.update_comment(cid, &body).await?,
+                    None => {
+                        self.forge()?.create_comment(*pr, &body).await?;
+                    }
+                }
+            }
+            report.note(format!("updated stack navigation on {} PRs", stack_prs.len()));
+        }
         Ok(report)
     }
+}
+
+/// Hidden marker used to find & update the navigation comment idempotently.
+const NAV_MARKER: &str = "<!-- jjk:nav -->";
+
+/// Build the stack-navigation comment for the PR at `current_idx` in `prs` (bottom→top). The PR
+/// numbers expand into GitHub's rich previews on their own, so we list just `#N`; a prominent
+/// footer shows this PR's position (`x/N`) and links jjk.
+fn nav_comment_body(prs: &[(String, u64)], current_idx: usize) -> String {
+    let n = prs.len();
+    let mut s = format!("**🥞 This change is part of the following stack · PR {}/{}**\n\n", current_idx + 1, n);
+    for (i, (_branch, pr)) in prs.iter().enumerate() {
+        let indent = "    ".repeat(i);
+        let marker = if i == current_idx { " ◀" } else { "" };
+        s.push_str(&format!("{indent}- #{pr}{marker}\n"));
+    }
+    s.push_str("\nManaged by [jjk](https://github.com/sirmammingtonham/jjk).\n");
+    s.push_str(NAV_MARKER);
+    s.push('\n');
+    s
 }
 
 impl Engine {

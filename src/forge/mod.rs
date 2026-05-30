@@ -14,4 +14,10 @@ pub trait Forge: Send + Sync {
     async fn create_pr(&self, head: &str, base: &str, title: &str, body: &str) -> Result<PrRef>;
     async fn update_pr(&self, pr: u64, base: Option<&str>, body: Option<&str>) -> Result<()>;
     async fn is_merged(&self, pr: u64) -> Result<bool>;
+
+    /// Id of the first comment on `pr` whose body contains `marker`, if any. Used to upsert the
+    /// stack-navigation comment idempotently.
+    async fn find_comment(&self, pr: u64, marker: &str) -> Result<Option<u64>>;
+    async fn create_comment(&self, pr: u64, body: &str) -> Result<u64>;
+    async fn update_comment(&self, comment_id: u64, body: &str) -> Result<()>;
 }

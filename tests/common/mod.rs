@@ -78,13 +78,38 @@ pub struct FakeForge {
 struct FakeState {
     next: u64,
     prs: Vec<PrRef>,
+    comments: Vec<FakeComment>,
+    next_comment: u64,
+}
+
+#[derive(Clone)]
+struct FakeComment {
+    id: u64,
+    pr: u64,
+    body: String,
 }
 
 impl FakeForge {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(FakeState { next: 1, prs: vec![] }),
+            inner: Mutex::new(FakeState {
+                next: 1,
+                next_comment: 1,
+                ..Default::default()
+            }),
         }
+    }
+
+    /// All comment bodies on a PR (for assertions).
+    pub fn comments_on(&self, pr: u64) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .comments
+            .iter()
+            .filter(|c| c.pr == pr)
+            .map(|c| c.body.clone())
+            .collect()
     }
 
     pub fn count(&self) -> usize {
@@ -127,6 +152,15 @@ impl Forge for SharedForge {
     }
     async fn is_merged(&self, pr: u64) -> Result<bool> {
         self.0.is_merged(pr).await
+    }
+    async fn find_comment(&self, pr: u64, marker: &str) -> Result<Option<u64>> {
+        self.0.find_comment(pr, marker).await
+    }
+    async fn create_comment(&self, pr: u64, body: &str) -> Result<u64> {
+        self.0.create_comment(pr, body).await
+    }
+    async fn update_comment(&self, comment_id: u64, body: &str) -> Result<()> {
+        self.0.update_comment(comment_id, body).await
     }
 }
 
@@ -175,5 +209,34 @@ impl Forge for FakeForge {
             .find(|p| p.number == pr)
             .map(|p| p.state == PrState::Merged)
             .unwrap_or(false))
+    }
+
+    async fn find_comment(&self, pr: u64, marker: &str) -> Result<Option<u64>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .comments
+            .iter()
+            .find(|c| c.pr == pr && c.body.contains(marker))
+            .map(|c| c.id))
+    }
+
+    async fn create_comment(&self, pr: u64, body: &str) -> Result<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let id = st.next_comment;
+        st.next_comment += 1;
+        st.comments.push(FakeComment {
+            id,
+            pr,
+            body: body.to_string(),
+        });
+        Ok(id)
+    }
+
+    async fn update_comment(&self, comment_id: u64, body: &str) -> Result<()> {
+        let mut st = self.inner.lock().unwrap();
+        if let Some(c) = st.comments.iter_mut().find(|c| c.id == comment_id) {
+            c.body = body.to_string();
+        }
+        Ok(())
     }
 }

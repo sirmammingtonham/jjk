@@ -83,3 +83,45 @@ async fn submit_skips_untracked_branches() {
     assert!(fake.pr_for("feat-a").is_some());
     assert!(fake.pr_for("scratch").is_none());
 }
+
+#[tokio::test]
+async fn submit_posts_idempotent_navigation_comments() {
+    let mut h = setup_with_remote();
+    build_three_branch_stack(&mut h);
+    let fake = Arc::new(FakeForge::new());
+    h.engine.set_forge(Box::new(SharedForge(fake.clone())));
+
+    h.engine.submit().await.unwrap();
+
+    let a = fake.pr_for("feat-a").unwrap().number;
+    let b = fake.pr_for("feat-b").unwrap().number;
+    let c = fake.pr_for("feat-c").unwrap().number;
+
+    // Each PR gets exactly one nav comment.
+    assert_eq!(fake.comments_on(a).len(), 1);
+    assert_eq!(fake.comments_on(c).len(), 1);
+
+    // The comment lists the whole stack bottom→top (bare #PR), with ◀ on the PR it lives on,
+    // a prominent x/N footer linking jjk, and the hidden marker.
+    let body_a = fake.comments_on(a).remove(0);
+    assert!(body_a.contains(&format!("- #{a} ◀")), "a marked: {body_a}");
+    assert!(body_a.contains(&format!("        - #{c}\n")), "c nested 2 levels: {body_a}");
+    // Position x/N, jjk link, and the hidden marker (loose checks — wording may evolve).
+    assert!(body_a.contains("1/3"), "position 1/3: {body_a}");
+    assert!(
+        body_a.contains("[jjk](https://github.com/sirmammingtonham/jjk)"),
+        "jjk link: {body_a}"
+    );
+    assert!(body_a.contains("<!-- jjk:nav -->"));
+
+    let body_c = fake.comments_on(c).remove(0);
+    assert!(body_c.contains(&format!("        - #{c} ◀")), "c marked deepest: {body_c}");
+    assert!(body_c.contains(&format!("- #{a}\n")), "a at root: {body_c}");
+    assert!(body_c.contains("3/3"), "position 3/3: {body_c}");
+
+    // Re-submit: comments are updated in place, not duplicated.
+    h.engine.submit().await.unwrap();
+    assert_eq!(fake.comments_on(a).len(), 1, "no duplicate nav comment");
+    assert_eq!(fake.comments_on(b).len(), 1);
+    assert_eq!(fake.comments_on(c).len(), 1);
+}

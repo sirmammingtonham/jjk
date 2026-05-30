@@ -21,13 +21,16 @@ impl GhCli {
         Self { slug }
     }
 
-    /// Parse `owner/repo` out of a GitHub remote URL (https or ssh forms).
+    /// Parse `owner/repo` out of a GitHub remote URL (https/ssh, with optional `user:pass@` creds).
     pub fn slug_from_url(url: &str) -> Option<String> {
         let s = url.trim().trim_end_matches('/');
-        let rest = s
-            .strip_prefix("git@github.com:")
-            .or_else(|| s.strip_prefix("https://github.com/"))
-            .or_else(|| s.strip_prefix("ssh://git@github.com/"))?;
+        // ssh shorthand: git@github.com:owner/repo(.git)
+        let rest = if let Some(r) = s.strip_prefix("git@github.com:") {
+            r
+        } else {
+            // https://[user[:pass]@]github.com/owner/repo or ssh://git@github.com/owner/repo
+            s.split_once("github.com/")?.1
+        };
         let rest = rest.strip_suffix(".git").unwrap_or(rest);
         let (owner, repo) = rest.split_once('/')?;
         let repo = repo.split('/').next().unwrap_or(repo);
@@ -172,6 +175,54 @@ impl Forge for GhCli {
         let s: S = serde_json::from_str(&out).context("parsing gh pr view JSON")?;
         Ok(map_state(&s.state) == PrState::Merged)
     }
+
+    async fn find_comment(&self, pr: u64, marker: &str) -> Result<Option<u64>> {
+        let slug = self.slug()?.to_string();
+        // PR comments are issue comments. Page through and pick the first carrying our marker.
+        let out = self
+            .run(&[
+                "api",
+                "--paginate",
+                &format!("repos/{slug}/issues/{pr}/comments"),
+                "--jq",
+                &format!(".[] | select(.body | contains(\"{marker}\")) | .id"),
+            ])
+            .await?;
+        Ok(out.lines().next().and_then(|l| l.trim().parse::<u64>().ok()))
+    }
+
+    async fn create_comment(&self, pr: u64, body: &str) -> Result<u64> {
+        let slug = self.slug()?.to_string();
+        let out = self
+            .run(&[
+                "api",
+                "-X",
+                "POST",
+                &format!("repos/{slug}/issues/{pr}/comments"),
+                "-f",
+                &format!("body={body}"),
+                "--jq",
+                ".id",
+            ])
+            .await?;
+        out.trim()
+            .parse::<u64>()
+            .map_err(|_| anyhow!("could not parse comment id from gh output: {out:?}"))
+    }
+
+    async fn update_comment(&self, comment_id: u64, body: &str) -> Result<()> {
+        let slug = self.slug()?.to_string();
+        self.run(&[
+            "api",
+            "-X",
+            "PATCH",
+            &format!("repos/{slug}/issues/comments/{comment_id}"),
+            "-f",
+            &format!("body={body}"),
+        ])
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +245,12 @@ mod tests {
         );
         assert_eq!(
             GhCli::slug_from_url("ssh://git@github.com/owner/repo.git").as_deref(),
+            Some("owner/repo")
+        );
+        // Token-authenticated URL (used for pushes).
+        assert_eq!(
+            GhCli::slug_from_url("https://x-access-token:ghp_abc@github.com/owner/repo.git")
+                .as_deref(),
             Some("owner/repo")
         );
         assert_eq!(GhCli::slug_from_url("/tmp/local/bare.git"), None);
