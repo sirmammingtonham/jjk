@@ -543,6 +543,174 @@ impl Engine {
         Ok(report)
     }
 
+    // ---------------------------------------------------------------- branch restructuring
+
+    /// `jjk trunk` — switch to the trunk branch.
+    pub fn trunk_checkout(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let (_, id) = self.trunk_anchor()?;
+        self.vcs.transaction(&mut |tx| {
+            tx.new_child(&id)?;
+            Ok(())
+        })?;
+        report.note(format!("switched to trunk '{}'", self.state.config.trunk));
+        Ok(report)
+    }
+
+    /// `jjk branch onto <target>` — move the current branch and everything stacked above it onto a
+    /// new base (`target` branch's tip, or trunk). The upstack rides along (jj auto-rebases).
+    pub fn branch_onto(&mut self, target: &str) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let stack = self.derive_stack()?;
+        let branch = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
+        if target == branch {
+            return Err(JjkError::Msg("cannot move a branch onto itself".into()).into());
+        }
+        let first = stack
+            .branch(&branch)
+            .and_then(|b| b.commits.first())
+            .map(|c| c.change_id.clone())
+            .ok_or_else(|| JjkError::UnknownBranch(branch.clone()))?;
+        let dest = if target == stack.trunk_name {
+            stack.trunk.clone()
+        } else {
+            self.branch_tip(target)?
+        };
+        self.vcs.transaction(&mut |tx| {
+            tx.rebase(&first, &dest)?;
+            Ok(())
+        })?;
+        report.note(format!("moved '{branch}' onto '{target}'"));
+        self.collect_conflicts(&mut report)?;
+        Ok(report)
+    }
+
+    /// `jjk branch rename [old] <new>` — rename a branch (default: the current one), preserving its
+    /// PR mapping in state.
+    pub fn branch_rename(&mut self, old: Option<&str>, new: &str) -> Result<Report> {
+        let mut report = Report::default();
+        let old = match old {
+            Some(o) => o.to_string(),
+            None => self.current_branch()?.ok_or(JjkError::NotOnBranch)?,
+        };
+        if old == self.state.config.trunk {
+            return Err(JjkError::IsTrunk(old).into());
+        }
+        if self.resolve_bookmark(&old)?.is_none() {
+            return Err(JjkError::UnknownBranch(old).into());
+        }
+        if self.resolve_bookmark(new)?.is_some() {
+            return Err(JjkError::Msg(format!("branch '{new}' already exists")).into());
+        }
+        let (o, n) = (old.clone(), new.to_string());
+        self.vcs.transaction(&mut |tx| tx.rename_bookmark(&o, &n))?;
+        if let Some(entry) = self.state.branches.remove(&old) {
+            self.state.branches.insert(new.to_string(), entry);
+        }
+        self.state.save(&self.root)?;
+        report.note(format!("renamed '{old}' to '{new}'"));
+        Ok(report)
+    }
+
+    /// `jjk branch diff` — show the current branch's diff against its base (downstack tip / trunk).
+    pub fn branch_diff(&self) -> Result<String> {
+        let stack = self.derive_stack()?;
+        let branch = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
+        let tip = stack
+            .branch(&branch)
+            .map(|b| b.tip.clone())
+            .ok_or_else(|| JjkError::UnknownBranch(branch.clone()))?;
+        // Use change ids as revset endpoints (always valid, even when the trunk bookmark is absent).
+        let base = stack
+            .downstack(&branch)
+            .map(|d| d.tip.clone())
+            .unwrap_or_else(|| stack.trunk.clone());
+        self.vcs
+            .diff(&format!("{}..{}", base.as_str(), tip.as_str()))
+    }
+
+    /// `jjk branch squash [-m M]` — collapse all of the current branch's commits into one.
+    pub fn branch_squash(&mut self, message: Option<&str>) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let stack = self.derive_stack()?;
+        let branch = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
+        let b = stack
+            .branch(&branch)
+            .ok_or_else(|| JjkError::UnknownBranch(branch.clone()))?;
+        if b.commit_count() <= 1 {
+            report.note(format!("'{branch}' already has a single commit"));
+            return Ok(report);
+        }
+        let first = b.commits[0].change_id.clone();
+        // Squash every commit above the first (first..tip, by change id) into the first.
+        let range = format!("{}..{}", first.as_str(), b.tip.as_str());
+        let msg = message.map(|s| s.to_string());
+        self.vcs.transaction(&mut |tx| {
+            tx.squash_revset(&range, &first)?;
+            if let Some(m) = &msg {
+                tx.describe(&first, m)?;
+            }
+            Ok(())
+        })?;
+        report.note(format!("squashed '{branch}' into one commit"));
+        self.collect_conflicts(&mut report)?;
+        Ok(report)
+    }
+
+    /// `jjk branch fold` — fold the current branch into its downstack base: the base's bookmark
+    /// advances over the current branch's commits and the current bookmark is dropped (one fewer
+    /// PR; the upstack reconnects to the base).
+    pub fn branch_fold(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let stack = self.derive_stack()?;
+        let branch = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
+        let tip = stack
+            .branch(&branch)
+            .map(|b| b.tip.clone())
+            .ok_or_else(|| JjkError::UnknownBranch(branch.clone()))?;
+        let base = stack.downstack(&branch).map(|d| d.name.clone()).ok_or_else(|| {
+            JjkError::Msg(format!(
+                "'{branch}' sits on trunk; nothing to fold into (folding into trunk isn't allowed)"
+            ))
+        })?;
+        let (bname, brn) = (base.clone(), branch.clone());
+        self.vcs.transaction(&mut |tx| {
+            tx.set_bookmark(&bname, &tip)?; // base absorbs the branch's commits
+            tx.delete_bookmark(&brn)?;
+            Ok(())
+        })?;
+        self.state.branches.remove(&branch);
+        self.state.save(&self.root)?;
+        report.note(format!("folded '{branch}' into '{base}'"));
+        Ok(report)
+    }
+
+    /// `jjk commit --fixup <target>` — fold the working-copy changes into `target` branch's tip (an
+    /// older commit downstack); descendants auto-rebase. (`git commit --fixup` + autosquash.)
+    pub fn commit_fixup(&mut self, target: &str) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        if target == self.state.config.trunk {
+            return Err(JjkError::IsTrunk(target.to_string()).into());
+        }
+        let target_tip = self.branch_tip(target)?;
+        // Snapshot so on-disk edits are captured into @ before folding them down.
+        let wc = self.vcs.snapshot()?;
+        if wc.is_empty {
+            report.note("nothing to fix up (working copy is clean)");
+            return Ok(report);
+        }
+        self.vcs
+            .transaction(&mut |tx| tx.squash_working_into(&target_tip))?;
+        report.note(format!("fixed up '{target}' with working-copy changes"));
+        self.collect_conflicts(&mut report)?;
+        Ok(report)
+    }
+
     // ---------------------------------------------------------------- worktrees (jj workspaces)
 
     /// `jjk worktree add <path> [name] [--branch B]` — create a jj workspace. The new workspace's

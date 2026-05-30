@@ -19,6 +19,7 @@ description: Every jjk command at a glance.
 | --- | --- |
 | `jjk commit -m <msg>` | Commit **all** current changes (no staging area). Mid-stack commits auto-restack the upstack. |
 | `jjk commit --amend [-m <msg>]` | Amend the current branch's tip; descendants auto-rebase. |
+| `jjk commit --fixup <branch>` | Fold the working-copy changes into `<branch>`'s tip (an older commit downstack); descendants auto-rebase. |
 | `jjk checkout -b <name>` | Create a new **untracked** branch on top of the current one. |
 | `jjk checkout <name>` | Switch to an existing branch (always safe; never errors on uncommitted work). |
 | `jjk status` | Working-copy status plus your position in the stack. |
@@ -33,10 +34,15 @@ description: Every jjk command at a glance.
 | --- | --- |
 | `jjk branch create [name]` | Create a new **tracked** branch (a PR) stacked on the current one. |
 | `jjk branch delete <name>` | Delete a branch and heal the gap, so the upstack reconnects to its parent. |
+| `jjk branch onto <target>` | Move the current branch (and everything above it) onto a new base. |
+| `jjk branch rename [old] <new>` | Rename a branch (default: the current one), keeping its PR mapping. |
+| `jjk branch diff` | Show the current branch's diff against its base. |
+| `jjk branch squash [-m <msg>]` | Collapse all of the current branch's commits into one. |
+| `jjk branch fold` | Fold the current branch into its downstack base (one fewer PR). |
 | `jjk track [name]` / `jjk untrack [name]` | Toggle whether a branch is part of the stack / gets a PR. Defaults to the current branch. |
 | `jjk restack` | Re-parent the upstack onto its bases. Usually a no-op (jj auto-rebases). |
 | `jjk up` / `jjk down` | Move one branch away from / toward trunk. |
-| `jjk top` / `jjk bottom` | Jump to the top / bottom of the stack. |
+| `jjk top` / `jjk bottom` / `jjk trunk` | Jump to the top / bottom of the stack, or to trunk. |
 | `jjk resolve` | Open the lowest conflicted change for editing; the fix propagates upstack. |
 | `jjk undo` | Undo the last operation (jj's operation log). |
 

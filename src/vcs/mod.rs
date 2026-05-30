@@ -46,6 +46,9 @@ pub trait Vcs {
     /// Whether `trunk()` resolves to a real (non-root) commit, i.e. a remote default branch exists.
     fn has_remote_trunk(&self) -> Result<bool>;
 
+    /// Human-readable diff for a revset (e.g. `base..tip`). Non-snapshotting.
+    fn diff(&self, revset: &str) -> Result<String>;
+
     // ---- mutations (grouped) ----
 
     /// Run a sequence of mutations. The binary adapter executes them sequentially (best effort,
@@ -98,6 +101,13 @@ pub trait VcsTx {
     /// Squash all changes from `from` into `into` (`jj squash --from --into`). `from` is abandoned
     /// when it becomes empty; a bookmark on it moves to its parent (forget it separately).
     fn squash(&mut self, from: &ChangeId, into: &ChangeId) -> Result<()>;
+
+    /// Like [`squash`](VcsTx::squash) but `from` is a revset (e.g. a whole range of commits to
+    /// collapse into `into`).
+    fn squash_revset(&mut self, from_revset: &str, into: &ChangeId) -> Result<()>;
+
+    /// Rename a local bookmark.
+    fn rename_bookmark(&mut self, old: &str, new: &str) -> Result<()>;
 
     /// `jj new <parent>`: create an empty child of `parent` and make it `@`. Returns its change id.
     fn new_child(&mut self, parent: &ChangeId) -> Result<ChangeId>;

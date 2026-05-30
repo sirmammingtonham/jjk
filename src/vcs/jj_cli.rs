@@ -222,6 +222,10 @@ impl Vcs for JjCli {
         Ok(!self.log("trunk() ~ root()")?.is_empty())
     }
 
+    fn diff(&self, revset: &str) -> Result<String> {
+        self.run(&["diff", "--ignore-working-copy", "--color=never", "-r", revset])
+    }
+
     fn resolve(&self, revset: &str) -> Result<Vec<CommitInfo>> {
         self.log(revset)
     }
@@ -427,6 +431,17 @@ impl<'a> VcsTx for JjTx<'a> {
     fn squash(&mut self, from: &ChangeId, into: &ChangeId) -> Result<()> {
         self.cli
             .run_with_stderr(&["squash", "--from", from.as_str(), "--into", into.as_str()])?;
+        Ok(())
+    }
+
+    fn squash_revset(&mut self, from_revset: &str, into: &ChangeId) -> Result<()> {
+        self.cli
+            .run_with_stderr(&["squash", "--from", from_revset, "--into", into.as_str()])?;
+        Ok(())
+    }
+
+    fn rename_bookmark(&mut self, old: &str, new: &str) -> Result<()> {
+        self.cli.run_with_stderr(&["bookmark", "rename", old, new])?;
         Ok(())
     }
 

@@ -49,6 +49,8 @@ pub enum Command {
     Top,
     /// Jump to the bottom of the stack.
     Bottom,
+    /// Switch to the trunk branch.
+    Trunk,
 
     /// Undo the last operation (jj op-log).
     Undo,
@@ -105,6 +107,9 @@ pub struct CommitArgs {
     /// Amend the branch tip instead of creating a new commit.
     #[arg(long)]
     pub amend: bool,
+    /// Fold the working-copy changes into this branch's tip (an older commit downstack).
+    #[arg(long, value_name = "BRANCH")]
+    pub fixup: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -122,6 +127,29 @@ pub enum BranchCmd {
     Create(NameArg),
     /// Delete a branch and heal the stack.
     Delete(NameArg),
+    /// Move the current branch (and its upstack) onto a new base.
+    Onto(NameArg),
+    /// Rename a branch: `rename <new>` (current) or `rename <old> <new>`.
+    Rename(RenameArgs),
+    /// Show the current branch's diff against its base.
+    Diff,
+    /// Collapse all of the current branch's commits into one.
+    Squash(MessageArg),
+    /// Fold the current branch into its downstack base.
+    Fold,
+}
+
+#[derive(Args, Debug)]
+pub struct RenameArgs {
+    /// Either `<new>` (rename the current branch) or `<old> <new>`.
+    #[arg(num_args = 1..=2, required = true)]
+    pub names: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct MessageArg {
+    #[arg(short = 'm', long = "message")]
+    pub message: Option<String>,
 }
 
 #[derive(Args, Debug)]

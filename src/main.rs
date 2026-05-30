@@ -69,7 +69,9 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
 
     match command {
         Command::Commit(args) => {
-            let report = if args.amend {
+            let report = if let Some(target) = args.fixup.as_deref() {
+                engine.commit_fixup(target)?
+            } else if args.amend {
                 engine.commit_amend(args.message.as_deref())?
             } else {
                 let msg = args
@@ -98,6 +100,30 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             let report = engine.branch_delete(&arg.name)?;
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
+        }
+        Command::Branch(BranchCmd::Onto(arg)) => {
+            let report = engine.branch_onto(&arg.name)?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
+        }
+        Command::Branch(BranchCmd::Rename(args)) => {
+            let report = match args.names.as_slice() {
+                [new] => engine.branch_rename(None, new)?,
+                [old, new] => engine.branch_rename(Some(old), new)?,
+                _ => anyhow::bail!("rename takes <new> or <old> <new>"),
+            };
+            render::print_report(&report);
+        }
+        Command::Branch(BranchCmd::Diff) => {
+            print!("{}", engine.branch_diff()?);
+        }
+        Command::Branch(BranchCmd::Squash(args)) => {
+            let report = engine.branch_squash(args.message.as_deref())?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
+        }
+        Command::Branch(BranchCmd::Fold) => {
+            render::print_report(&engine.branch_fold()?);
         }
         Command::Track(arg) => {
             render::print_report(&engine.set_tracked(arg.name.as_deref(), true)?);
@@ -140,6 +166,7 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         Command::Down => render::print_report(&engine.navigate(NavDir::Down)?),
         Command::Top => render::print_report(&engine.navigate(NavDir::Top)?),
         Command::Bottom => render::print_report(&engine.navigate(NavDir::Bottom)?),
+        Command::Trunk => render::print_report(&engine.trunk_checkout()?),
 
         Command::Undo => render::print_report(&engine.undo()?),
 
