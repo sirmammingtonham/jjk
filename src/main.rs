@@ -108,6 +108,10 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             let stack = engine.derive_stack()?;
             print!("{}", render::render_ls(&stack));
         }
+        Command::Ll => {
+            let stack = engine.derive_stack()?;
+            print!("{}", render::render_ll(&stack));
+        }
 
         Command::Up => render::print_report(&engine.navigate(NavDir::Up)?),
         Command::Down => render::print_report(&engine.navigate(NavDir::Down)?),

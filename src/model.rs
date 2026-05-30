@@ -73,6 +73,8 @@ pub struct CommitInfo {
     /// Remote-tracking bookmarks pointing here (the `git` pseudo-remote is filtered out).
     pub remote_bookmarks: Vec<RemoteRef>,
     pub description: String,
+    /// Relative commit time for display, e.g. "2 days ago".
+    pub time_ago: String,
     pub is_empty: bool,
     pub has_conflict: bool,
     /// True if this commit is the working-copy commit of the *current* workspace (`@`).

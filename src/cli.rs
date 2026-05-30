@@ -36,8 +36,10 @@ pub enum Command {
 
     /// Working-copy status with stack position.
     Status,
-    /// Stack diagram and current position.
+    /// Stack diagram (branches only).
     Ls,
+    /// Stack diagram with each branch's commits (log long).
+    Ll,
 
     /// Move up one branch (away from trunk).
     Up,

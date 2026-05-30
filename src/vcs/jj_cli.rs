@@ -20,10 +20,11 @@ const COMMIT_TEMPLATE: &str = concat!(
     r#" ++ local_bookmarks.map(|b| b.name()).join(",") ++ "\t""#,
     r#" ++ remote_bookmarks.map(|b| b.name() ++ "@" ++ b.remote()).join(",") ++ "\t""#,
     r#" ++ parents.map(|p| p.change_id()).join(",") ++ "\t""#,
+    r#" ++ committer.timestamp().ago() ++ "\t""#,
     r#" ++ description.first_line() ++ "\n""#,
 );
 
-const NUM_FIELDS: usize = 10;
+const NUM_FIELDS: usize = 11;
 
 /// Adapter over the `jj` binary rooted at a repo.
 pub struct JjCli {
@@ -154,7 +155,8 @@ fn parse_commit(line: &str) -> Result<CommitInfo> {
         local_bookmarks: split_csv(f[6]),
         remote_bookmarks,
         parents: split_csv(f[8]).into_iter().map(ChangeId).collect(),
-        description: f[9].to_string(),
+        time_ago: f[9].to_string(),
+        description: f[10].to_string(),
     })
 }
 
