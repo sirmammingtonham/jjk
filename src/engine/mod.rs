@@ -5,7 +5,7 @@ pub mod stack;
 
 use crate::error::{JjkError, Result};
 use crate::forge::Forge;
-use crate::model::{ChangeId, CommitInfo};
+use crate::model::{ChangeId, CommitInfo, PrState};
 use crate::state::State;
 use crate::vcs::{PushOpts, Vcs};
 use stack::{Branch, Stack};
@@ -679,6 +679,128 @@ impl Engine {
             }
         }
         self.state.save(&self.root)?;
+        Ok(report)
+    }
+}
+
+impl Engine {
+    /// `jjk sync` — fetch trunk, reconcile merged branches, rebase the survivors, force-push and
+    /// retarget their PR bases (ARCHITECTURE §6). Landing-method agnostic (JJ_NOTES §9): squash and
+    /// merge-commit are both handled by the `roots(trunk()..top)` rebase + empty/immutable handling.
+    pub async fn sync(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+
+        // 1. Capture branch→PR BEFORE fetching: a merge-commit landing absorbs the merged branch
+        // into trunk on fetch, after which it no longer appears in the derived stack (JJ_NOTES §9b).
+        self.ensure_fresh(&mut report)?;
+        let pre = self.derive_stack()?;
+        let candidates: Vec<(String, u64)> = pre
+            .branches
+            .iter()
+            .filter_map(|b| b.pr.map(|pr| (b.name.clone(), pr)))
+            .collect();
+
+        // 2. fetch (advances local trunk; JJ_NOTES §9), then query merged-state.
+        self.vcs.fetch(&self.state.config.remote)?;
+        report.note(format!("fetched {}", self.state.config.remote));
+        let mut merged_names: Vec<String> = Vec::new();
+        for (name, pr) in &candidates {
+            if self.forge()?.is_merged(*pr).await? {
+                merged_names.push(name.clone());
+            }
+        }
+        if merged_names.is_empty() {
+            report.note("no merged PRs to reconcile");
+        } else {
+            report.note(format!("merged: {}", merged_names.join(", ")));
+        }
+
+        // 3. Rebase the whole stack onto the (advanced) trunk. In the squash case the merged
+        // branch's commits become empty; in the merge-commit case they're already in trunk's
+        // ancestry (immutable) and are left untouched.
+        let moved = self.rebase_stack_onto_trunk()?;
+        if moved > 0 {
+            report.note(format!("rebased {moved} stack root(s) onto trunk"));
+        }
+
+        // 4. Reconcile each merged branch.
+        let post = self.derive_stack()?;
+        for name in &merged_names {
+            match post.branch(name) {
+                // Squash landing: the branch is now empty & mutable above trunk → abandon it,
+                // which deletes the bookmark and reconnects the upstack to its parent.
+                Some(b) => {
+                    let range: Vec<ChangeId> =
+                        b.commits.iter().map(|c| c.change_id.clone()).collect();
+                    self.vcs.transaction(&mut |tx| tx.abandon(&range))?;
+                    report.note(format!("abandoned merged '{name}' (squash landing)"));
+                }
+                // Merge-commit landing: the branch's commit is an ancestor of trunk (immutable);
+                // nothing to abandon — just drop the (now redundant) local bookmark.
+                None => {
+                    if self.vcs.bookmarks()?.iter().any(|bm| bm.name == *name) {
+                        let n = name.clone();
+                        self.vcs.transaction(&mut |tx| tx.delete_bookmark(&n))?;
+                    }
+                    report.note(format!("dropped merged '{name}' (merge-commit landing)"));
+                }
+            }
+            self.state.branches.remove(name);
+        }
+
+        // 5. Recover the current workspace if a rewrite left it stale (cross-workspace: Phase 5).
+        if self.vcs.is_stale().unwrap_or(false) {
+            self.vcs.update_stale()?;
+            report.note("recovered stale working copy");
+        }
+
+        // 6 + 7. Force-push survivors and retarget their PR bases bottom-up.
+        let remote = self.state.config.remote.clone();
+        let survivors = self.derive_stack()?;
+        let trunk_name = survivors.trunk_name.clone();
+        let mut prev_tracked: Option<String> = None;
+        let mut pushed = 0usize;
+        for b in survivors.branches.iter().filter(|b| b.tracked) {
+            // A conflicted commit cannot be pushed; skip and report (D4 — don't abort).
+            if b.has_conflict() {
+                report.note(format!(
+                    "skipped '{}' — has conflicts; resolve then re-run `jjk sync`",
+                    b.name
+                ));
+                prev_tracked = Some(b.name.clone());
+                continue;
+            }
+            self.vcs.push(&remote, &b.name, PushOpts::default())?;
+            pushed += 1;
+            if let Some(pr) = b.pr {
+                let base = prev_tracked.clone().unwrap_or_else(|| trunk_name.clone());
+                // Retarget best-effort: a dependent PR may have been closed by GitHub when its base
+                // branch was deleted on merge — you can't retarget a closed PR, so report instead.
+                match self.forge()?.get_pr(&b.name).await? {
+                    Some(p) if p.state == PrState::Open => {
+                        self.forge()?.update_pr(pr, Some(&base), None).await?;
+                        report.note(format!("#{pr} {} → base {base}", b.name));
+                    }
+                    Some(p) => report.note(format!(
+                        "#{pr} {} is {}; not retargeting (reopen it to restack the PR)",
+                        b.name, p.state
+                    )),
+                    None => report.note(format!("{}: PR not found; skipping retarget", b.name)),
+                }
+            }
+            prev_tracked = Some(b.name.clone());
+        }
+        if pushed > 0 {
+            report.note(format!("force-pushed {pushed} surviving branch(es)"));
+        }
+
+        // Best-effort: propagate merged-branch deletions to the remote.
+        if !merged_names.is_empty() {
+            let _ = self.vcs.push_deleted(&remote);
+        }
+
+        self.state.save(&self.root)?;
+        self.collect_conflicts(&mut report)?;
         Ok(report)
     }
 }

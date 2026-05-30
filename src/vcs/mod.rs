@@ -63,6 +63,8 @@ pub trait Vcs {
 
     fn fetch(&self, remote: &str) -> Result<()>;
     fn push(&self, remote: &str, bookmark: &str, opts: PushOpts) -> Result<()>;
+    /// Push all pending bookmark deletions to the remote (`jj git push --deleted`).
+    fn push_deleted(&self, remote: &str) -> Result<()>;
     fn add_remote(&self, name: &str, url: &str) -> Result<()>;
     /// Names of configured remotes (excludes the colocated `git` pseudo-remote).
     fn remotes(&self) -> Result<Vec<String>>;

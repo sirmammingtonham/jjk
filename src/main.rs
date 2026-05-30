@@ -128,7 +128,11 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             let report = engine.submit().await?;
             render::print_report(&report);
         }
-        Command::Sync => anyhow::bail!("`sync` is implemented in Phase 4"),
+        Command::Sync => {
+            let report = engine.sync().await?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
+        }
 
         // Handled before reaching here.
         Command::Repo(_) | Command::Add => unreachable!(),

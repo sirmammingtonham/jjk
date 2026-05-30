@@ -292,6 +292,11 @@ impl Vcs for JjCli {
         Ok(())
     }
 
+    fn push_deleted(&self, remote: &str) -> Result<()> {
+        self.run_with_stderr(&["git", "push", "--remote", remote, "--deleted"])?;
+        Ok(())
+    }
+
     fn add_remote(&self, name: &str, url: &str) -> Result<()> {
         self.run(&["git", "remote", "add", name, url])?;
         Ok(())
