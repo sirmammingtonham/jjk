@@ -1,0 +1,82 @@
+---
+title: Quickstart
+description: Your first stack in two minutes.
+---
+
+# Quickstart
+
+This walks through a local stack first (no GitHub), then submitting it as stacked PRs.
+
+## 1. Initialize a repo
+
+```bash
+mkdir my-project && cd my-project
+jjk repo init
+```
+
+`repo init` creates a [colocated](https://jj-vcs.github.io/jj/latest/git-compatibility/) jj+git repo,
+so plain `git` keeps working alongside `jjk` as an escape hatch. It detects and stores your trunk
+(`main` by default) and remote.
+
+## 2. Build a stack
+
+Create a branch, commit into it, then stack another branch on top. There is no staging area, so
+`jjk commit` commits all current changes. Save incremental progress with multiple commits.
+
+```bash
+jjk branch create feat-a
+echo "first change" > a.txt
+jjk commit -m "add a.txt"
+
+echo "more" >> a.txt
+jjk commit -m "extend a.txt"      # feat-a now has two commits
+
+jjk branch create feat-b          # stacked on top of feat-a
+echo "b" > b.txt
+jjk commit -m "add b.txt"
+```
+
+See where you are with `jjk ls`:
+
+```
+    ┏━■ feat-b ◀
+  ┏━┻□ feat-a
+main
+```
+
+## 3. Move around and edit mid-stack
+
+```bash
+jjk down                 # move to feat-a (toward trunk)
+echo "fix" >> a.txt
+jjk commit -m "fix in a"
+```
+
+`feat-b` is **automatically restacked** onto feat-a's new tip, with no `restack` step and no
+replayed conflicts. Use `jjk up`, `jjk top`, and `jjk bottom` to navigate the rest of the stack, and
+`jjk undo` to reverse the last operation.
+
+## 4. Submit as stacked PRs
+
+Point `origin` at a GitHub repo you can write to, then:
+
+```bash
+jjk submit
+```
+
+This pushes each branch and opens a PR per branch, each based on the one below it
+(`feat-a` onto `main`, `feat-b` onto `feat-a`). It's idempotent, so you can edit and re-run
+`jjk submit` to update the same PRs in place without creating duplicates. Each PR gets a
+stack-navigation comment showing its position.
+
+## 5. After a PR merges
+
+Merge the bottom PR on GitHub, then:
+
+```bash
+jjk sync
+```
+
+`sync` fetches trunk, drops the merged branch, rebases the survivors onto the new trunk,
+force-pushes them, and retargets their PR bases, so the next PR's diff stays clean. See
+[the workflow guide](/workflow) for the full picture.

@@ -1,0 +1,61 @@
+---
+title: Command reference
+description: Every jjk command at a glance.
+---
+
+# Command reference
+
+`jjk` speaks familiar git commands. Run `jjk <command> --help` for flags.
+
+## Repo setup
+
+| Command | What it does |
+| --- | --- |
+| `jjk repo init` | Initialize a colocated jj+git repo here; detect & store trunk and remote. |
+
+## Local work
+
+| Command | What it does |
+| --- | --- |
+| `jjk commit -m <msg>` | Commit **all** current changes (no staging area). Mid-stack commits auto-restack the upstack. |
+| `jjk commit --amend [-m <msg>]` | Amend the current branch's tip; descendants auto-rebase. |
+| `jjk checkout -b <name>` | Create a new **untracked** branch on top of the current one. |
+| `jjk checkout <name>` | Switch to an existing branch (always safe; never errors on uncommitted work). |
+| `jjk status` | Working-copy status plus your position in the stack. |
+| `jjk ls` | Stack diagram (branches only). |
+| `jjk ll` | Stack diagram with each branch's commits. |
+| `jjk stash` / `jjk stash pop` | Park / restore working-copy changes (mostly unnecessary, since switching is safe in jj). |
+| `jjk add` | Friendly reminder that there's no staging area. |
+
+## Stack management
+
+| Command | What it does |
+| --- | --- |
+| `jjk branch create [name]` | Create a new **tracked** branch (a PR) stacked on the current one. |
+| `jjk branch delete <name>` | Delete a branch and heal the gap, so the upstack reconnects to its parent. |
+| `jjk track [name]` / `jjk untrack [name]` | Toggle whether a branch is part of the stack / gets a PR. Defaults to the current branch. |
+| `jjk restack` | Re-parent the upstack onto its bases. Usually a no-op (jj auto-rebases). |
+| `jjk up` / `jjk down` | Move one branch away from / toward trunk. |
+| `jjk top` / `jjk bottom` | Jump to the top / bottom of the stack. |
+| `jjk resolve` | Open the lowest conflicted change for editing; the fix propagates upstack. |
+| `jjk undo` | Undo the last operation (jj's operation log). |
+
+## Remote & forge (GitHub)
+
+| Command | What it does |
+| --- | --- |
+| `jjk fetch` | Fetch from the remote. |
+| `jjk pull` | Fetch trunk and rebase the current stack onto it (no merged-PR detection, no push). |
+| `jjk push` | Push the current branch (force-with-lease). |
+| `jjk submit` | Push the stack and create/update a PR per branch, each based on the one below it. Idempotent; updates the stack-navigation comment. |
+| `jjk sync` | Fetch, reconcile merged PRs, rebase survivors onto trunk, force-push, and retarget PR bases. Handles squash- and merge-commit landings. |
+
+## Worktrees (parallel workspaces)
+
+| Command | What it does |
+| --- | --- |
+| `jjk worktree add <path> [name] [--branch <b>]` | Add a [jj workspace](https://jj-vcs.github.io/jj/latest/working-copy/#workspaces), optionally started on a branch. |
+| `jjk worktree list` | List workspaces and each one's current branch. |
+| `jjk worktree remove <name>` | Stop tracking a workspace (files are left on disk). |
+
+The current branch is tracked **per workspace**; stale working copies are recovered automatically.

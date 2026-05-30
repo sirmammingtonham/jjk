@@ -1,115 +1,84 @@
 # jjk — jujutsu, kinda
 
-A CLI that gives you familiar **git / git-spice command semantics** while using
-**[Jujutsu (jj)](https://jj-vcs.github.io/jj/)** as the engine underneath, to manage stacked
-GitHub PRs. You keep the git mental model; jj does the hard work (automatic rebasing, first-class
-conflicts, stable change identity, undo).
+**Stacked GitHub PRs with the git commands you already know, minus the restack pain.**
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the design, [`PROMPT.md`](PROMPT.md) for the build
-plan, and [`JJ_NOTES.md`](JJ_NOTES.md) for the empirically-confirmed jj behaviors this is built on.
+![](https://i.imgflip.com/at3gj0.jpg)
 
-## Requirements
+`jjk` is a CLI that gives you a familiar **git** command surface and a stacking workflow (inspired by
+[git-spice](https://abhinav.github.io/git-spice/)) while using
+**[Jujutsu (jj)](https://jj-vcs.github.io/jj/)** as the engine underneath. You keep the git mental
+model. jj does the hard parts: automatic rebasing, first-class conflicts, stable change identity, and
+instant undo.
 
-- **jj 0.41.0** (pinned — jj is pre-1.0 and its CLI churns; see `JJ_NOTES.md`).
-- `gh` (for forge operations, Phase 3+).
-- A jj user identity configured (`jj config set --user user.name/.email`), or `JJ_CONFIG` set.
+📖 **[Documentation](https://sirmammingtonham.github.io/jjk/)**
 
-```sh
+```
+🥞 jjk ls
+
+    ┏━■ feat-c ◀
+  ┏━┻□ feat-b
+┏━┻□ feat-a
+main
+```
+
+## Features
+
+- **Familiar commands.** `commit`, `branch create`, `checkout`, `submit`, `sync`. No new VCS to learn.
+- **Stacked PRs on GitHub**, each correctly based on the one below it, with an auto-updated stack
+  navigation comment.
+- **Mid-stack edits auto-restack the upstack.** No manual restack step and no replaying conflicts in
+  commits that won't ship.
+- **Clean syncs.** After a PR merges (squash or merge-commit), `jjk sync` rebases the survivors onto
+  trunk, retargets their bases, and pushes, with no duplicated or garbled diffs.
+- **Conflicts never stop the world.** They live inside commits; you resolve once and the fix
+  propagates upstack.
+- **Parallel worktrees** for working several branches at once, and `jjk undo` for anything.
+
+## Installation
+
+Requires [jj](https://jj-vcs.github.io/jj/) 0.41.0, the [GitHub CLI](https://cli.github.com/) (`gh`,
+authenticated, for PR commands), and a configured jj identity.
+
+```bash
 brew install jj
-cargo build --release
+gh auth login
+jj config set --user user.name "Your Name"
+jj config set --user user.email "you@example.com"
+
+cargo install --path .
 ```
 
-## Status
+See the [installation guide](https://sirmammingtonham.github.io/jjk/installation) for details.
 
-| Phase | Scope | State |
-|---|---|---|
-| 0 | jj behavior probe (`JJ_NOTES.md`) | ✅ done |
-| 1 | Local feel: `repo init`, `commit`, `commit --amend`, `branch create`, `checkout [-b]`, `status`, `ls`, `up`/`down`/`top`/`bottom`, `undo` | ✅ done |
-| 2 | Stack derivation: `restack`, `track`/`untrack`, `branch delete` (heal-the-gap) | ✅ done |
-| 3 | Forge: `fetch`, `pull`, `push`, `submit` (idempotent, bottom-up bases) | ✅ done |
-| 4 | `sync` (merged-branch reconciliation; squash + merge-commit) | ✅ done |
-| 5 | Worktrees (`jj workspace`), `stash`, `resolve`, per-workspace stale recovery | ✅ done |
-| 6 | Crate adapters (`jj-lib`/`octocrab`), optional | ⏳ |
+## Usage
 
-## Quick start (Phase 1)
-
-```sh
-jjk repo init                 # init + colocate; detect/store trunk + remote
-jjk branch create feat-a      # new stack-tracked branch
+```bash
+jjk repo init                       # init a colocated jj+git repo
+jjk branch create feat-a            # start a branch (one PR)
 echo hi > file.txt
-jjk commit -m "first change"  # commits ALL current changes (no staging area)
-echo more >> file.txt
-jjk commit -m "more"          # feat-a now has two commits
-jjk branch create feat-b      # stack feat-b on top of feat-a
+jjk commit -m "first change"        # commit; multiple commits per branch is fine
+jjk branch create feat-b            # stack another branch on top
 jjk commit -m "feat-b work"
-jjk ls                        # show the stack
-jjk down                      # move to feat-a; edits here auto-restack feat-b
-jjk submit                    # open/update a stacked PR per branch (correct bases)
-jjk sync                      # after a PR merges: reconcile, rebase survivors, retarget, push
-jjk undo                      # reverse the last operation
+jjk ls                              # show the stack
+jjk submit                          # open a stacked PR per branch
+# ...merge the bottom PR on GitHub...
+jjk sync                            # reconcile, rebase, retarget, push
 ```
 
-`jjk ls` shows the stack top→bottom with the current branch marked:
+The [quickstart](https://sirmammingtonham.github.io/jjk/quickstart) and
+[workflow guide](https://sirmammingtonham.github.io/jjk/workflow) walk through the full loop, and the
+[command reference](https://sirmammingtonham.github.io/jjk/commands) lists everything.
 
-```
-◉ feat-b   (no PR)  1 commit   ← current
-  feat-a   (no PR)  2 commits
-  main (trunk)
-```
+## Contributing
 
-## How it works (the short version)
-
-- A **branch** = a jj **bookmark** at the tip of a contiguous range of jj commits (≈ one PR).
-  Multiple commits per branch is natural.
-- The working copy `@` is kept as an **empty child of the current branch tip**; your edits
-  accumulate there and `jjk commit` finalizes them and advances the bookmark.
-- The stack graph is **never persisted** — it's derived from jj at runtime via revsets. Only the
-  branch→PR map and config live in `.jj/jjk/state.toml`.
-- A **mid-stack commit** auto-restacks the upstack (jj rebases descendants; conflicts are stored
-  in commits, never halting).
-
-## Worktrees (parallel workspaces)
-
-Map git worktrees to `jj workspace` — all share one repo/op-log, each has its own working copy.
-Great for running several agents in parallel, each on a different branch.
-
-```sh
-jjk worktree add ../agent-b --branch feat-b   # new workspace started on feat-b
-jjk worktree list                              # each workspace + its own current branch
-jjk worktree remove agent-b                    # stop tracking (files left on disk)
-```
-
-The "current branch" is **per-workspace** (derived from that workspace's `@`). If a `sync`/`commit`
-in one workspace rewrites history, other workspaces' working copies are **automatically recovered**
-(`jj workspace update-stale`) the next time you run a `jjk` command there.
-
-## Stash
-
-Mostly unnecessary (switching branches is always safe in jj), provided for muscle memory:
-
-```sh
-jjk stash        # park working-copy changes on a jjk/stash/N bookmark; clean @
-jjk stash pop     # restore the most recent stash into the working copy
-```
-
-## Conflicts (resolve flow)
-
-jj stores conflicts **inside commits** — operations complete rather than halting. When `jjk`
-reports `CONFLICT: N change(s) need resolution`:
-
-1. `jjk resolve` opens the lowest conflicted change for editing (jj materializes conflict markers
-   in the affected files).
-2. Edit the files to resolve; the next `jjk` command re-snapshots the working copy and the
-   resolution **propagates to descendants** automatically.
-3. `jjk checkout <branch>` restores a clean working copy; `jjk status` confirms it's resolved.
-
-## Development
-
-```sh
-cargo test            # integration tests run against real temporary jj repos (not mocks)
+```bash
+cargo test
 cargo clippy --all-targets
 ```
 
-All `jj` subprocess calls are centralized in `src/vcs/jj_cli.rs` and parse **templated**
-`--no-graph` output. The engine depends only on the `Vcs`/`Forge` traits — no backend type leaks
-into it.
+The docs site (built with [Vocs](https://vocs.dev)) lives in [`docs/`](docs); design notes are in
+[`docs/design/`](docs/design).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

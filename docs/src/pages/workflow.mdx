@@ -1,0 +1,132 @@
+---
+title: The stacked-PR workflow
+description: How a stack is built, submitted, reviewed, merged, and synced with jjk.
+---
+
+# The stacked-PR workflow
+
+## Mental model
+
+- A **branch** is one PR: a [jj bookmark](https://jj-vcs.github.io/jj/latest/bookmarks/) sitting at
+  the tip of a contiguous range of commits. Multiple commits per branch is normal.
+- Your working copy is always an empty change on top of the current branch tip. `jjk commit`
+  finalizes your edits into a real commit and advances the branch.
+- The stack graph is **derived from jj at runtime**, so there's nothing to keep in sync and nothing
+  to corrupt. The only thing `jjk` stores is the branch to PR-number mapping.
+
+## 1. Build the stack
+
+```bash
+jjk branch create feat-a
+# ...edit, jjk commit...
+jjk branch create feat-b      # stacked on feat-a
+# ...edit, jjk commit...
+```
+
+Editing a lower branch **auto-restacks everything above it**. jj rebases the descendants when an
+ancestor changes, and `jjk` just records the bookmarks that moved. `jjk restack` exists for parity
+but is usually a no-op.
+
+```bash
+jjk ls    # the stack, top to bottom
+jjk ll    # the stack, with each branch's commits
+```
+
+```
+    ┏━■ feat-c ◀
+    ┃   9a6c68f9b7 polish ui (2 minutes ago)
+  ┏━┻□ feat-b
+  ┃    cb82c87f73 wire up handler (5 minutes ago)
+┏━┻□ feat-a
+┃    0041183abc add feature flag (8 minutes ago)
+main
+```
+
+## 2. Submit
+
+```bash
+jjk submit
+```
+
+This pushes each tracked branch (force-with-lease), opens a PR per branch based on its downstack
+branch (or trunk for the bottom), and adds a **stack-navigation comment** to each PR listing every
+PR in the stack and marking the current one with `◀`:
+
+```
+🥞 This change is part of the following stack · PR 3/3
+
+- #19
+    - #20
+        - #21 ◀
+```
+
+`submit` is **idempotent**. Re-running it after edits updates the existing PRs and comments in
+place, and never creates duplicates.
+
+## 3. Iterate during review
+
+Address feedback on any branch, including mid-stack:
+
+```bash
+jjk down                         # go to the branch under review
+# ...make changes...
+jjk commit -m "address review"   # upstack auto-restacks
+jjk submit                       # update all affected PRs and bases
+```
+
+To amend the tip of a branch instead of adding a commit:
+
+```bash
+jjk commit --amend -m "reworded"
+```
+
+## 4. Merge and sync
+
+Merge the **bottom** PR on GitHub. Squash and merge-commit are both handled. Then:
+
+```bash
+jjk sync
+```
+
+`sync` does the following:
+
+1. Fetches, so your local trunk fast-forwards to include the merge.
+2. Asks GitHub which PRs are merged.
+3. Rebases the **whole remaining stack** onto the new trunk.
+4. Reconciles the merged branch. It abandons the now-empty change (squash) or drops the bookmark
+   (merge-commit) so the next branch reconnects directly to trunk.
+5. Force-pushes the survivors and **retargets their PR bases** (the next branch's base becomes
+   `main`).
+
+The result is clean upstack diffs, with no duplicated or garbled content, regardless of how the
+bottom PR landed.
+
+`jjk pull` is the lighter cousin. It fetches and rebases the stack onto trunk, but does no merged-PR
+detection and no push.
+
+## Conflicts
+
+jj stores conflicts inside commits, so operations complete instead of halting. When `jjk` reports
+`CONFLICT: N change(s) need resolution`:
+
+```bash
+jjk resolve            # opens the lowest conflicted change for editing
+# ...edit the marked files to resolve...
+jjk status             # confirms it's resolved; the fix propagates upstack
+jjk checkout <branch>  # restore a clean working copy
+```
+
+## Working on several branches at once
+
+Each [jj workspace](https://jj-vcs.github.io/jj/latest/working-copy/#workspaces) is its own working
+directory sharing the same repo. This is handy for running multiple agents in parallel, one per
+branch:
+
+```bash
+jjk worktree add ../agent-b --branch feat-b
+jjk worktree list
+```
+
+The current branch is tracked per-workspace. If a `sync` or `commit` in one workspace rewrites
+history, other workspaces are **automatically recovered** the next time you run a `jjk` command
+there.

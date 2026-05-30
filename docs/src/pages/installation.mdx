@@ -1,0 +1,62 @@
+---
+title: Installation
+description: Install jjk and its dependencies.
+---
+
+# Installation
+
+## Requirements
+
+| Tool | Why | Notes |
+| --- | --- | --- |
+| **[jj](https://jj-vcs.github.io/jj/) 0.41.0** | the VCS engine `jjk` drives | pinned, since jj is pre-1.0 and its CLI changes between releases |
+| **[gh](https://cli.github.com/)** | GitHub PR operations | only needed for `push` / `submit` / `sync`; must be authenticated |
+| **A jj identity** | authoring commits | set once, globally |
+
+Install jj (macOS shown; see the [jj install docs](https://jj-vcs.github.io/jj/latest/install-and-setup/) for other platforms):
+
+```bash
+brew install jj
+```
+
+Authenticate the GitHub CLI (for the forge commands):
+
+```bash
+gh auth login
+```
+
+Configure a jj identity so your commits aren't authored anonymously:
+
+```bash
+jj config set --user user.name  "Your Name"
+jj config set --user user.email "you@example.com"
+```
+
+## Install jjk
+
+`jjk` is a Rust binary. Build and install it from source with Cargo:
+
+```bash
+git clone https://github.com/sirmammingtonham/jjk
+cd jjk
+cargo install --path .
+```
+
+This drops the `jjk` binary into `~/.cargo/bin`, which is on your `PATH`. Re-run the same command to
+upgrade after pulling changes; `cargo uninstall jjk` removes it.
+
+Prefer not to install globally? Build and use the binary directly:
+
+```bash
+cargo build --release
+./target/release/jjk --help
+```
+
+## Verify
+
+```bash
+jjk --help
+jj --version   # should report 0.41.0
+```
+
+You're ready. Head to the [Quickstart](/quickstart).

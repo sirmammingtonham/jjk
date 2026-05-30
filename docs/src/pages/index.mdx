@@ -1,0 +1,81 @@
+---
+title: What is jjk?
+description: Familiar git commands and a stacking workflow over Jujutsu (jj) for painless stacked GitHub PRs.
+---
+
+# jjk — jujutsu, kinda
+
+**Stacked GitHub PRs with the git commands you already know, minus the restack pain.**
+
+`jjk` gives you a familiar **git** command surface and a stacking workflow (inspired by
+[git-spice](https://abhinav.github.io/git-spice/)) while using
+**[Jujutsu (jj)](https://jj-vcs.github.io/jj/)** as the engine underneath. You keep the git mental
+model. jj quietly does the hard parts: automatic rebasing, first-class conflicts, stable change
+identity, and instant undo.
+
+## The problem
+
+Stacking PRs is the right way to ship large changes as small, reviewable pieces. But with git-based
+stacking tools it hurts in two specific, recurring ways as a stack evolves.
+
+The first is **restack conflicts on changes that don't even survive**. `git rebase` replays commits
+one by one and halts on every conflict, including conflicts inside commits whose changes get
+superseded later in the stack. You resolve the same noise over and over, in commits that won't ship.
+
+The second is **post-merge diff garbling**. When the bottom PR squash-merges, your local branch and
+the new trunk now contain "the same" change twice. Rebasing the rest of the stack onto the new trunk
+smears duplicated diffs across the upstack, so reviewers see noise that isn't really there and you
+spend the afternoon untangling it.
+
+The fix for both already exists. It's **Jujutsu**. jj auto-rebases every descendant when an ancestor
+changes, stores conflicts *inside commits* instead of stopping the world, and detects when a change
+has become empty after a merge. The catch is that adopting jj means learning a brand-new VCS, with a
+different mental model and a different set of commands. I'm not reading the docs lol.
+
+
+<img
+  src="https://i.redd.it/jjk-fans-really-cant-read-man-v0-fuhqaukkb9cf1.png?width=2225&format=png&auto=webp&s=acb8157e351a1d2a74b184addd7f28894c9bec4b"
+  alt="jjk"
+  style={{ borderRadius: '12px', marginTop: '1.5rem' }}
+/>
+
+## The idea
+
+`jjk` is a thin translation layer, not a new VCS:
+
+```
+you type a git verb  ->  jjk maps it to (jj ops + state + GitHub calls)
+```
+
+You never have to think about jj. You `commit`, `branch create`, `checkout`, `submit`, and `sync`,
+and jj does the rebasing, conflict storage, and identity tracking for free.
+
+## What you get
+
+- **`commit` feels like git.** Edit, commit, repeat. Multiple commits per branch is natural.
+- **Mid-stack edits auto-restack the upstack.** No manual `restack` and no replayed conflicts. jj
+  moves everything, and `jjk` just pushes the bookmarks that moved.
+- **`sync` after a merge is clean.** It abandons the merged change, rebases the survivors onto the
+  new trunk, force-pushes, and retargets PR bases. The upstack diff stays clean whether the PR was
+  squash-merged or merge-committed.
+- **Conflicts never stop the world.** They're stored in commits and reported git-style. You resolve
+  once, where it matters, and the resolution propagates.
+- **Undo anything** with `jjk undo`, which exposes jj's operation log.
+- **Stacked PRs on GitHub**, each correctly based on the one below it, with an auto-updated stack
+  navigation comment.
+
+```
+🥞 jjk ls
+
+    ┏━■ feat-c ◀
+  ┏━┻□ feat-b
+┏━┻□ feat-a
+main
+```
+
+## Next steps
+
+- [Installation](/installation): get the `jjk` binary.
+- [Quickstart](/quickstart): your first stack in two minutes.
+- [The stacked-PR workflow](/workflow): submit, review, merge, sync.
+- [Command reference](/commands): every command at a glance.
