@@ -1,6 +1,6 @@
-//! Binary `Vcs` adapter: shells out to the pinned `jj` binary (0.41.0) and parses **templated**
-//! `--no-graph` output. All `jj` subprocess calls in the whole program live here, so version
-//! quirks stay in one place. Verified against JJ_NOTES.md.
+//! Binary `Vcs` adapter: shells out to the `jj` binary and parses **templated** `--no-graph`
+//! output. All `jj` subprocess calls in the whole program live here, so version quirks stay in one
+//! place. Developed against jj 0.41.x (see [`SUPPORTED_JJ_MINOR`]); verified against JJ_NOTES.md.
 
 use crate::error::Result;
 use crate::model::{
@@ -10,6 +10,43 @@ use crate::vcs::{PushOpts, Vcs, VcsTx};
 use anyhow::{anyhow, Context};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The jj minor version jjk is developed against (the `41` in `0.41.x`). jj is pre-1.0, so its CLI
+/// can change between minor releases; patch releases are treated as compatible.
+pub const SUPPORTED_JJ_MINOR: u32 = 41;
+
+/// A compatibility note if the installed jj's minor version differs from [`SUPPORTED_JJ_MINOR`].
+/// Returns `None` when jj is on a compatible version, or can't be found/parsed.
+pub fn version_warning() -> Option<String> {
+    let out = Command::new("jj").arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    warning_for_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pure compatibility check for the text of `jj --version` (e.g. `"jj 0.41.0"`). Patch versions are
+/// compatible; only a differing major/minor warns.
+fn warning_for_version(version_output: &str) -> Option<String> {
+    let ver = version_output
+        .split_whitespace()
+        .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))?;
+    let mut parts = ver.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts
+        .next()?
+        .trim_end_matches(|c: char| !c.is_ascii_digit())
+        .parse()
+        .ok()?;
+    if (major, minor) == (0, SUPPORTED_JJ_MINOR) {
+        return None;
+    }
+    Some(format!(
+        "warning: jjk is built against jj 0.{SUPPORTED_JJ_MINOR}.x; you have jj {ver}.\n\
+         jj is pre-1.0 and its CLI can change between releases, so compatibility isn't guaranteed.\n\
+         If you hit issues, install jj 0.{SUPPORTED_JJ_MINOR}.x."
+    ))
+}
 
 /// Tab-separated, one-record-per-line template. `description.first_line()` is **last** and cannot
 /// contain a newline, so each record is exactly one line; the parser uses `splitn` so a tab inside
@@ -434,5 +471,31 @@ impl<'a> VcsTx for JjTx<'a> {
         args.extend(revs.iter().map(|r| r.as_str()));
         self.cli.run_with_stderr(&args)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::{warning_for_version, SUPPORTED_JJ_MINOR};
+
+    #[test]
+    fn supported_minor_and_patches_are_silent() {
+        assert!(warning_for_version(&format!("jj 0.{SUPPORTED_JJ_MINOR}.0")).is_none());
+        assert!(warning_for_version(&format!("jj 0.{SUPPORTED_JJ_MINOR}.7")).is_none());
+        // pre-release/build suffix on the patch is still the supported minor
+        assert!(warning_for_version(&format!("jj 0.{SUPPORTED_JJ_MINOR}.0-abc")).is_none());
+    }
+
+    #[test]
+    fn other_minors_and_majors_warn() {
+        assert!(warning_for_version(&format!("jj 0.{}.0", SUPPORTED_JJ_MINOR + 1)).is_some());
+        assert!(warning_for_version(&format!("jj 0.{}.0", SUPPORTED_JJ_MINOR - 1)).is_some());
+        assert!(warning_for_version("jj 1.0.0").is_some());
+    }
+
+    #[test]
+    fn unparseable_is_silent() {
+        assert!(warning_for_version("not a version").is_none());
+        assert!(warning_for_version("").is_none());
     }
 }

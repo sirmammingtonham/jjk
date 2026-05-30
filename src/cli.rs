@@ -6,11 +6,11 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "jjk",
     version,
-    about = "git/git-spice command semantics over Jujutsu (jj) for stacked GitHub PRs"
+    about = "Familiar git commands and a stacking workflow over Jujutsu (jj) for stacked GitHub PRs"
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]

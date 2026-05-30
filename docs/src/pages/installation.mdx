@@ -9,7 +9,7 @@ description: Install jjk and its dependencies.
 
 | Tool | Why | Notes |
 | --- | --- | --- |
-| **[jj](https://jj-vcs.github.io/jj/) 0.41.0** | the VCS engine `jjk` drives | pinned, since jj is pre-1.0 and its CLI changes between releases |
+| **[jj](https://jj-vcs.github.io/jj/) 0.41.x** | the VCS engine `jjk` drives | the version jjk is built against; other versions may work, and `jjk` warns at startup if yours differs (jj is pre-1.0, so its CLI can change between releases) |
 | **[gh](https://cli.github.com/)** | GitHub PR operations | only needed for `push` / `submit` / `sync`; must be authenticated |
 | **A jj identity** | authoring commits | set once, globally |
 
@@ -56,7 +56,7 @@ cargo build --release
 
 ```bash
 jjk --help
-jj --version   # should report 0.41.0
+jj --version   # 0.41.x is the tested version; jjk warns if yours differs
 ```
 
 You're ready. Head to the [Quickstart](/quickstart).

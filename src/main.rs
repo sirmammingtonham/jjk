@@ -2,7 +2,7 @@
 //! Data flows one way: cli → engine → {Vcs, Forge, state} → render.
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use jjk::cli::{BranchCmd, Cli, Command, RepoCmd, StashAction, WorktreeCmd};
 use jjk::engine::{Engine, NavDir};
 use jjk::render;
@@ -10,8 +10,22 @@ use std::process::ExitCode;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // When the user is looking at top-level help, surface a jj-version compatibility note.
+    if wants_top_level_help() {
+        if let Some(w) = jjk::vcs::jj_cli::version_warning() {
+            eprintln!("{w}\n");
+        }
+    }
+
     let cli = Cli::parse();
-    match run(cli).await {
+    let Some(command) = cli.command else {
+        // Bare `jjk`: print help.
+        let _ = Cli::command().print_help();
+        println!();
+        return ExitCode::SUCCESS;
+    };
+
+    match run(command).await {
         Ok(code) => code,
         Err(e) => {
             // Surface errors (including passed-through jj/gh errors) verbatim.
@@ -21,10 +35,18 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+/// True when the invocation is the top-level help (bare `jjk`, `jjk help`, `jjk --help`, `jjk -h`).
+fn wants_top_level_help() -> bool {
+    match std::env::args().nth(1) {
+        None => true,
+        Some(a) => matches!(a.as_str(), "help" | "--help" | "-h"),
+    }
+}
+
+async fn run(command: Command) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot determine current directory")?;
 
-    match cli.command {
+    match command {
         Command::Repo(RepoCmd::Init(args)) => {
             let report = Engine::repo_init(&cwd, args.trunk, args.remote)?;
             render::print_report(&report);

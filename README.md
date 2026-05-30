@@ -36,7 +36,7 @@ main
 
 ## Installation
 
-Requires [jj](https://jj-vcs.github.io/jj/) 0.41.0, the [GitHub CLI](https://cli.github.com/) (`gh`,
+Requires [jj](https://jj-vcs.github.io/jj/), the [GitHub CLI](https://cli.github.com/) (`gh`,
 authenticated, for PR commands), and a configured jj identity.
 
 ```bash
