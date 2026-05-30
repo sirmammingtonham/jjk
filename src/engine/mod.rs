@@ -228,10 +228,13 @@ impl Engine {
             },
         };
 
-        // Linear ancestry from trunk (exclusive) up to top (inclusive), newest-first → reverse.
+        // Mutable ancestry from trunk (exclusive) up to top (inclusive), newest-first → reverse.
+        // `& mutable()` excludes already-merged / shared (immutable) commits, which are part of
+        // trunk's world, not the editable stack. Without this, a branch built on top of a
+        // previously-merged stack would display (and try to rebase) those immutable commits.
         let mut commits = self
             .vcs
-            .resolve(&format!("{}..{}", trunk_revset, top_id.as_str()))?;
+            .resolve(&format!("({}..{}) & mutable()", trunk_revset, top_id.as_str()))?;
         commits.reverse(); // bottom → top
 
         // Group into branches: a commit carrying a (non-trunk) local bookmark closes a branch.
@@ -757,8 +760,11 @@ impl Engine {
         let Some(top) = stack.top() else {
             return Ok(0);
         };
+        // Only rebase MUTABLE roots. Immutable commits (already merged / shared) are part of
+        // trunk's world; jj refuses to rewrite them, and we don't need to (a branch built atop a
+        // previously-merged stack rebases its own mutable commits straight onto trunk).
         let roots = self.vcs.resolve(&format!(
-            "roots({}..{})",
+            "roots(({}..{}) & mutable())",
             trunk_revset,
             top.tip.as_str()
         ))?;

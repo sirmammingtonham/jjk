@@ -187,3 +187,67 @@ async fn sync_reports_conflict_without_aborting() {
     // feat-b still present (conflicted), stack intact.
     assert!(h.engine.derive_stack().unwrap().branch("feat-b").is_some());
 }
+
+/// Run a raw `jj` command in `root` (for test setup that jjk doesn't expose).
+fn jj(root: &Path, args: &[&str]) {
+    let ok = Command::new("jj")
+        .arg("-R")
+        .arg(root)
+        .args(args)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "jj {:?} failed in {:?}", args, root);
+}
+
+#[tokio::test]
+async fn sync_with_branch_stacked_on_merged_immutable_commits() {
+    // Regression: tracking an existing branch that was part of an already-merged stack leaves
+    // immutable commits between trunk and your new branch. derive/ls must exclude them, and sync
+    // must not try to rewrite them (jj refuses; it used to crash with "Commit ... is immutable").
+    let mut h = setup_with_remote();
+    let root = h.repo.path().to_path_buf();
+
+    // Seed trunk.
+    write(&root, "base.txt", "base\n");
+    jj(&root, &["describe", "-m", "trunk"]);
+    jj(&root, &["bookmark", "create", "main", "-r", "@"]);
+    jj(&root, &["new", "-m", ""]);
+
+    // An older, already-landed branch: push it, then untrack + forget so its commits become
+    // immutable (reachable only from an untracked remote bookmark).
+    write(&root, "old.txt", "old\n");
+    jj(&root, &["commit", "-m", "old work"]);
+    jj(&root, &["bookmark", "create", "feat-old", "-r", "@-"]);
+    jj(&root, &["git", "push", "-b", "main", "-b", "feat-old"]);
+    jj(&root, &["bookmark", "untrack", "feat-old@origin"]);
+    jj(&root, &["bookmark", "forget", "feat-old"]);
+
+    // A new branch stacked on top of those (now immutable) commits.
+    write(&root, "new.txt", "new\n");
+    jj(&root, &["commit", "-m", "new work"]);
+    jj(&root, &["bookmark", "create", "feat-new", "-r", "@-"]);
+
+    let fake = Arc::new(FakeForge::new());
+    h.engine.set_forge(Box::new(SharedForge(fake.clone())));
+
+    // Derivation excludes the immutable commits: feat-new is one branch with one commit.
+    let stack = h.engine.derive_stack().unwrap();
+    assert_eq!(
+        stack.branches.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+        ["feat-new"]
+    );
+    assert_eq!(stack.branch("feat-new").unwrap().commit_count(), 1, "no immutable commits in range");
+
+    // sync must complete (not crash on immutable commits) and rebase feat-new straight onto trunk.
+    h.engine.sync().await.unwrap();
+
+    let after = h.engine.derive_stack().unwrap();
+    let feat_new = after.branch("feat-new").unwrap();
+    assert!(
+        feat_new.commits[0].parents.contains(&after.trunk),
+        "feat-new should be rebased directly onto trunk (parents {:?}, trunk {:?})",
+        feat_new.commits[0].parents,
+        after.trunk
+    );
+}
