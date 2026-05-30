@@ -52,7 +52,7 @@ pub enum Command {
     /// Switch to the trunk branch.
     Trunk,
 
-    /// Undo the last operation (jj op-log).
+    /// Undo the last jjk command as one unit (restores via jj's op-log); repeat to go further back.
     Undo,
 
     /// Manage parallel working trees (jj workspaces).

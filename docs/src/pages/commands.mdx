@@ -47,7 +47,7 @@ description: Every jjk command at a glance.
 | `jjk up` / `jjk down` | Move one branch away from / toward trunk. |
 | `jjk top` / `jjk bottom` / `jjk trunk` | Jump to the top / bottom of the stack, or to trunk. |
 | `jjk resolve` | Open the lowest conflicted change for editing; the fix propagates upstack. |
-| `jjk undo` | Undo the last operation (jj's operation log). |
+| `jjk undo` | Undo the last `jjk` command as a single unit (it may be several jj operations), restoring both the repo and jjk's state. Run repeatedly to walk further back. |
 
 ## Remote & forge (GitHub)
 

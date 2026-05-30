@@ -15,6 +15,17 @@ use std::path::{Path, PathBuf};
 /// Revset for bookmarks that participate in the stack — excludes internal `jjk/stash/*` bookmarks.
 const STACK_BOOKMARKS: &str = r#"(bookmarks() ~ bookmarks(glob:"jjk/stash/*"))"#;
 
+/// How many undo checkpoints to retain (one per mutating jjk command).
+const MAX_CHECKPOINTS: usize = 100;
+
+/// A single undo point: the jj operation to restore to, plus a snapshot of jjk's state.toml so the
+/// two stay in sync. Stored as a stack in `.jj/jjk/undo.json`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Checkpoint {
+    op_id: String,
+    state: String,
+}
+
 /// User-facing result of a command: notes to print + any conflicts surfaced (never aborts; ARCH D4).
 #[derive(Debug, Default)]
 pub struct Report {
@@ -970,9 +981,64 @@ impl Engine {
     }
 
     /// `jjk undo` — expose jj's op-log undo.
+    /// Record a checkpoint before a mutating command runs, so `jjk undo` can revert the *whole*
+    /// command in one step. A single jjk command maps to several jj operations (e.g. `commit` does
+    /// `jj commit` + `jj bookmark set` + restacks); plain `jj undo` reverts only the last of them,
+    /// which leaves the repo half-changed. We snapshot the head op id (and jjk's own state.toml)
+    /// here and `jj op restore` to it in [`undo`]. Best-effort: a failure must never block the real
+    /// command, so callers ignore the error (undo then falls back to a single `jj undo`).
+    pub fn checkpoint(&self) -> Result<()> {
+        let op_id = self.vcs.current_op_id()?;
+        let state = std::fs::read_to_string(State::path_for(&self.root)).unwrap_or_default();
+        let mut stack = self.load_checkpoints();
+        stack.push(Checkpoint { op_id, state });
+        // Keep the log bounded; old checkpoints fall off the bottom.
+        let len = stack.len();
+        if len > MAX_CHECKPOINTS {
+            stack.drain(0..len - MAX_CHECKPOINTS);
+        }
+        self.save_checkpoints(&stack)
+    }
+
+    fn undo_log_path(&self) -> PathBuf {
+        self.root.join(".jj").join("jjk").join("undo.json")
+    }
+
+    fn load_checkpoints(&self) -> Vec<Checkpoint> {
+        std::fs::read_to_string(self.undo_log_path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_checkpoints(&self, stack: &[Checkpoint]) -> Result<()> {
+        let path = self.undo_log_path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, serde_json::to_string(stack)?)?;
+        Ok(())
+    }
+
+    /// `jjk undo` — revert the last jjk command as one unit. Pops the most recent checkpoint and
+    /// `jj op restore`s to it (also restoring jjk's state.toml). With no checkpoint recorded (e.g.
+    /// the change predates this feature), falls back to a single `jj undo`.
     pub fn undo(&mut self) -> Result<Report> {
         let mut report = Report::default();
-        let msg = self.vcs.undo()?;
+        let mut stack = self.load_checkpoints();
+        let msg = match stack.pop() {
+            Some(ckpt) => {
+                let msg = self.vcs.restore_op(&ckpt.op_id)?;
+                // Restore jjk's own state alongside the jj repo so the two don't drift.
+                if !ckpt.state.is_empty() {
+                    std::fs::write(State::path_for(&self.root), &ckpt.state)?;
+                    self.state = State::load(&self.root)?;
+                }
+                self.save_checkpoints(&stack)?;
+                msg
+            }
+            None => self.vcs.undo()?,
+        };
         for line in msg.lines() {
             report.note(line.to_string());
         }

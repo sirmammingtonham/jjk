@@ -306,6 +306,22 @@ impl Vcs for JjCli {
         Ok(stderr.trim().to_string())
     }
 
+    fn current_op_id(&self) -> Result<String> {
+        // Snapshot the working copy first (no --ignore-working-copy) so pending edits become part of
+        // the returned operation; restoring to it later brings those edits back as uncommitted `@`.
+        let out = self.run(&["op", "log", "--no-graph", "--color=never", "--limit", "1", "-T", "id"])?;
+        let id = out.lines().next().unwrap_or("").trim().to_string();
+        if id.is_empty() {
+            return Err(anyhow!("could not resolve the current jj operation id"));
+        }
+        Ok(id)
+    }
+
+    fn restore_op(&self, op_id: &str) -> Result<String> {
+        let (_out, stderr) = self.run_with_stderr(&["op", "restore", op_id])?;
+        Ok(stderr.trim().to_string())
+    }
+
     fn workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         // `jj workspace list` prints `name: <commit-summary>`; pair each name with its @ change id
         // via the `<name>@` revset. Per-workspace staleness detection is refined in Phase 5; here

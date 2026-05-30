@@ -37,6 +37,21 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Whether a command changes the repo (so it should record an undo checkpoint). Pure reads and
+/// `undo` itself don't; everything else does (including remote commands, which still create local
+/// jj operations).
+fn mutates(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Status
+            | Command::Ls
+            | Command::Ll
+            | Command::Branch(BranchCmd::Diff)
+            | Command::Worktree(WorktreeCmd::List)
+            | Command::Undo
+    )
+}
+
 /// True when the invocation is the top-level help (bare `jjk`, `jjk help`, `jjk --help`, `jjk -h`).
 fn wants_top_level_help() -> bool {
     match std::env::args().nth(1) {
@@ -68,6 +83,13 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
 async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Result<ExitCode> {
     let mut engine = Engine::open(cwd)?;
     let mut conflicts = false;
+
+    // Make a mutating jjk command a single undo unit: record a checkpoint so `jjk undo` can
+    // `jj op restore` past *all* the jj operations the command performs (not just the last).
+    // Best-effort — never block the real command if the checkpoint can't be written.
+    if mutates(&command) {
+        let _ = engine.checkpoint();
+    }
 
     match command {
         Command::Commit(args) => {

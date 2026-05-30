@@ -7,6 +7,8 @@ export default defineConfig({
     'Familiar git commands and a stacking workflow over Jujutsu (jj) for painless stacked GitHub PRs.',
   baseUrl: 'https://ethan.website/jjk',
   basePath: '/jjk',
+  // basePath isn't auto-prepended to iconUrl (unlike vocs's own assets), so include it.
+  iconUrl: '/jjk/favicon.ico',
   // Pure static bundle (no server runtime) for GitHub Pages.
   renderStrategy: 'full-static',
   theme: {

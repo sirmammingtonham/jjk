@@ -62,6 +62,15 @@ pub trait Vcs {
     /// Undo the last operation (`jj undo`). Returns the human description jj printed.
     fn undo(&self) -> Result<String>;
 
+    /// The id of the current head operation in jj's op log. Snapshots the working copy first (so the
+    /// returned op captures any pending edits), making it a faithful "before" checkpoint to restore
+    /// to. Used to make a whole jjk command (which is several jj operations) one undo unit.
+    fn current_op_id(&self) -> Result<String>;
+
+    /// Restore the repo to an earlier operation (`jj op restore <id>`); reverts commits, bookmarks
+    /// and the working copy in one step. Returns the human description jj printed.
+    fn restore_op(&self, op_id: &str) -> Result<String>;
+
     // ---- workspaces ----
 
     fn workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
