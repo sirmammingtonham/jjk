@@ -111,6 +111,20 @@ impl JjCli {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
+    /// Run a `jj` command that needs the terminal (interactive editors); inherits stdio.
+    fn run_interactive(&self, args: &[&str]) -> Result<()> {
+        let status = Command::new("jj")
+            .arg("-R")
+            .arg(&self.root)
+            .args(args)
+            .status()
+            .context("failed to spawn `jj`")?;
+        if !status.success() {
+            return Err(anyhow!("jj {} failed", args.join(" ")));
+        }
+        Ok(())
+    }
+
     /// Like [`run`] but also returns stderr (jj prints progress like "Rebased N commits" there).
     fn run_with_stderr(&self, args: &[&str]) -> Result<(String, String)> {
         let out = Command::new("jj")
@@ -243,6 +257,10 @@ impl Vcs for JjCli {
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("could not resolve working-copy commit @"))
+    }
+
+    fn split_interactive(&self, rev: &ChangeId) -> Result<()> {
+        self.run_interactive(&["split", "-r", rev.as_str()])
     }
 
     fn bookmarks(&self) -> Result<Vec<Bookmark>> {
@@ -442,6 +460,12 @@ impl<'a> VcsTx for JjTx<'a> {
 
     fn rename_bookmark(&mut self, old: &str, new: &str) -> Result<()> {
         self.cli.run_with_stderr(&["bookmark", "rename", old, new])?;
+        Ok(())
+    }
+
+    fn duplicate_after(&mut self, rev: &ChangeId, after: &ChangeId) -> Result<()> {
+        self.cli
+            .run_with_stderr(&["duplicate", rev.as_str(), "--insert-after", after.as_str()])?;
         Ok(())
     }
 

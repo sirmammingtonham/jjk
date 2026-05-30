@@ -73,6 +73,10 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         Command::Commit(args) => {
             let report = if let Some(target) = args.fixup.as_deref() {
                 engine.commit_fixup(target)?
+            } else if args.split {
+                engine.commit_split()?
+            } else if let Some(rev) = args.pick.as_deref() {
+                engine.commit_pick(rev)?
             } else if args.amend {
                 engine.commit_amend(args.message.as_deref())?
             } else {
@@ -126,6 +130,9 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         }
         Command::Branch(BranchCmd::Fold) => {
             render::print_report(&engine.branch_fold()?);
+        }
+        Command::Branch(BranchCmd::Split(args)) => {
+            render::print_report(&engine.branch_split(&args.name, &args.at)?);
         }
         Command::Branch(BranchCmd::Submit) => {
             render::print_report(&engine.submit(SubmitScope::Branch).await?);

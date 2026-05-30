@@ -20,6 +20,8 @@ description: Every jjk command at a glance.
 | `jjk commit -m <msg>` | Commit **all** current changes (no staging area). Mid-stack commits auto-restack the upstack. |
 | `jjk commit --amend [-m <msg>]` | Amend the current branch's tip; descendants auto-rebase. |
 | `jjk commit --fixup <branch>` | Fold the working-copy changes into `<branch>`'s tip (an older commit downstack); descendants auto-rebase. |
+| `jjk commit --split` | Split the branch tip into two commits (interactive diff editor). |
+| `jjk commit --pick <rev>` | Copy a commit (e.g. from an upstack branch) onto the current branch. |
 | `jjk checkout -b <name>` | Create a new **untracked** branch on top of the current one. |
 | `jjk checkout <name>` | Switch to an existing branch (always safe; never errors on uncommitted work). |
 | `jjk status` | Working-copy status plus your position in the stack. |
@@ -39,6 +41,7 @@ description: Every jjk command at a glance.
 | `jjk branch diff` | Show the current branch's diff against its base. |
 | `jjk branch squash [-m <msg>]` | Collapse all of the current branch's commits into one. |
 | `jjk branch fold` | Fold the current branch into its downstack base (one fewer PR). |
+| `jjk branch split <new> <commit>` | Split the current branch at `<commit>` into two branches (`<new>` takes the lower commits). |
 | `jjk track [name]` / `jjk untrack [name]` | Toggle whether a branch is part of the stack / gets a PR. Defaults to the current branch. |
 | `jjk restack` | Re-parent the upstack onto its bases. Usually a no-op (jj auto-rebases). |
 | `jjk up` / `jjk down` | Move one branch away from / toward trunk. |

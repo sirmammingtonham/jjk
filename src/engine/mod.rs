@@ -711,6 +711,89 @@ impl Engine {
         Ok(report)
     }
 
+    /// `jjk commit --split` — split the current branch's tip into two commits via an interactive
+    /// diff editor (`jj split`); descendants auto-rebase.
+    pub fn commit_split(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let (branch, tip) = self.current_branch_tip()?.ok_or(JjkError::NotOnBranch)?;
+        self.vcs.split_interactive(&tip)?;
+        report.note(format!("split the tip of '{branch}'"));
+        self.collect_conflicts(&mut report)?;
+        Ok(report)
+    }
+
+    /// `jjk commit --pick <rev>` — copy a commit (e.g. from an upstack branch) onto the current
+    /// branch's tip; the upstack rides along.
+    pub fn commit_pick(&mut self, rev: &str) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let (branch, tip) = self.current_branch_tip()?.ok_or(JjkError::NotOnBranch)?;
+        let src = self
+            .vcs
+            .resolve(rev)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| JjkError::Msg(format!("no commit matches '{rev}'")))?
+            .change_id;
+        let tip_cl = tip.clone();
+        self.vcs
+            .transaction(&mut |tx| tx.duplicate_after(&src, &tip_cl))?;
+        // After --insert-after, the copy is the sole new child of the old tip.
+        let dup = self
+            .vcs
+            .resolve(&format!("children({})", tip.as_str()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| JjkError::Msg("could not locate the picked commit".into()))?
+            .change_id;
+        let bname = branch.clone();
+        self.vcs
+            .transaction(&mut |tx| tx.set_bookmark(&bname, &dup))?;
+        report.note(format!("picked {} onto '{branch}'", src.short()));
+        self.collect_conflicts(&mut report)?;
+        Ok(report)
+    }
+
+    /// `jjk branch split <new> <commit>` — split the current branch at `commit`: a new tracked
+    /// branch `<new>` takes the commits up to and including `commit`; the current branch keeps the
+    /// rest. (`commit` must be within the branch and below its tip.)
+    pub fn branch_split(&mut self, new_name: &str, at: &str) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let stack = self.derive_stack()?;
+        let branch = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
+        let b = stack
+            .branch(&branch)
+            .ok_or_else(|| JjkError::UnknownBranch(branch.clone()))?;
+        if self.resolve_bookmark(new_name)?.is_some() {
+            return Err(JjkError::Msg(format!("branch '{new_name}' already exists")).into());
+        }
+        let at_id = self
+            .vcs
+            .resolve(at)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| JjkError::Msg(format!("no commit matches '{at}'")))?
+            .change_id;
+        if at_id == b.tip || !b.commits.iter().any(|c| c.change_id == at_id) {
+            return Err(JjkError::Msg(format!(
+                "split point must be a commit within '{branch}', below its tip"
+            ))
+            .into());
+        }
+        let name = new_name.to_string();
+        self.vcs
+            .transaction(&mut |tx| tx.create_bookmark(&name, &at_id))?;
+        self.state.branch_mut(new_name).tracked = true;
+        self.state.save(&self.root)?;
+        report.note(format!(
+            "split '{branch}' at {}: '{new_name}' holds the lower commits",
+            at_id.short()
+        ));
+        Ok(report)
+    }
+
     // ---------------------------------------------------------------- worktrees (jj workspaces)
 
     /// `jjk worktree add <path> [name] [--branch B]` — create a jj workspace. The new workspace's

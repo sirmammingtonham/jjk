@@ -116,6 +116,12 @@ pub struct CommitArgs {
     /// Fold the working-copy changes into this branch's tip (an older commit downstack).
     #[arg(long, value_name = "BRANCH")]
     pub fixup: Option<String>,
+    /// Split the branch tip into two commits (interactive diff editor).
+    #[arg(long)]
+    pub split: bool,
+    /// Copy a commit (e.g. from an upstack branch) onto the current branch.
+    #[arg(long, value_name = "REV")]
+    pub pick: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -143,8 +149,18 @@ pub enum BranchCmd {
     Squash(MessageArg),
     /// Fold the current branch into its downstack base.
     Fold,
+    /// Split the current branch at a commit into two branches.
+    Split(BranchSplitArgs),
     /// Create/update the PR for just the current branch.
     Submit,
+}
+
+#[derive(Args, Debug)]
+pub struct BranchSplitArgs {
+    /// Name for the new (lower) branch.
+    pub name: String,
+    /// The commit to split at (its commits and below go to the new branch); must be below the tip.
+    pub at: String,
 }
 
 #[derive(Subcommand, Debug)]

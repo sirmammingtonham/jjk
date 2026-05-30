@@ -128,3 +128,45 @@ fn commit_fixup_folds_into_downstack_commit() {
     // The fix landed in feat-a (its file now has the edit; working copy is clean again).
     assert!(e.vcs().snapshot().unwrap().is_empty, "working copy clean after fixup");
 }
+
+#[test]
+fn commit_pick_copies_a_commit_onto_current_branch() {
+    let (tmp, mut e) = setup();
+    let root = tmp.path().to_path_buf();
+    commit_branch(&mut e, &root, "feat-a", "a.txt", "a\n");
+    commit_branch(&mut e, &root, "feat-b", "b.txt", "b\n");
+    let b_commit = e.derive_stack().unwrap().branch("feat-b").unwrap().tip.clone();
+
+    e.checkout("feat-a").unwrap();
+    e.commit_pick(b_commit.as_str()).unwrap();
+
+    let stack = e.derive_stack().unwrap();
+    assert_eq!(stack.branch("feat-a").unwrap().commit_count(), 2, "feat-a gained the picked commit");
+    // The picked content is now present on feat-a's working copy.
+    assert!(root.join("b.txt").exists(), "picked commit's file is present");
+    assert_eq!(e.current_branch().unwrap().as_deref(), Some("feat-a"));
+}
+
+#[test]
+fn branch_split_divides_a_branch() {
+    let (tmp, mut e) = setup();
+    let root = tmp.path().to_path_buf();
+    e.branch_create("feat-a", true).unwrap();
+    write(&root, "a.txt", "1\n");
+    e.commit("a1").unwrap();
+    write(&root, "a.txt", "1\n2\n");
+    e.commit("a2").unwrap();
+    write(&root, "a.txt", "1\n2\n3\n");
+    e.commit("a3").unwrap();
+
+    // Split at the second commit (a2): feat-lower = a1,a2 ; feat-a = a3.
+    let a2 = e.derive_stack().unwrap().branch("feat-a").unwrap().commits[1].change_id.clone();
+    e.branch_split("feat-lower", a2.as_str()).unwrap();
+
+    let stack = e.derive_stack().unwrap();
+    let names: Vec<_> = stack.branches.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["feat-lower", "feat-a"]);
+    assert_eq!(stack.branch("feat-lower").unwrap().commit_count(), 2);
+    assert_eq!(stack.branch("feat-a").unwrap().commit_count(), 1);
+    assert!(e.state().is_tracked("feat-lower"));
+}

@@ -40,6 +40,10 @@ pub trait Vcs {
     /// cost), so call this when `@` must reflect current edits.
     fn snapshot(&self) -> Result<CommitInfo>;
 
+    /// Split a revision into two interactively (`jj split` opens a diff editor; inherits the
+    /// terminal). Descendants auto-rebase.
+    fn split_interactive(&self, rev: &ChangeId) -> Result<()>;
+
     /// All local bookmarks.
     fn bookmarks(&self) -> Result<Vec<Bookmark>>;
 
@@ -108,6 +112,10 @@ pub trait VcsTx {
 
     /// Rename a local bookmark.
     fn rename_bookmark(&mut self, old: &str, new: &str) -> Result<()>;
+
+    /// Copy `rev` as a new commit inserted right after `after` (`jj duplicate --insert-after`),
+    /// rebasing `after`'s existing children onto the copy.
+    fn duplicate_after(&mut self, rev: &ChangeId, after: &ChangeId) -> Result<()>;
 
     /// `jj new <parent>`: create an empty child of `parent` and make it `@`. Returns its change id.
     fn new_child(&mut self, parent: &ChangeId) -> Result<ChangeId>;
