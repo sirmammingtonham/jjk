@@ -12,6 +12,9 @@ use stack::{Branch, Stack};
 
 use std::path::{Path, PathBuf};
 
+/// Revset for bookmarks that participate in the stack — excludes internal `jjk/stash/*` bookmarks.
+const STACK_BOOKMARKS: &str = r#"(bookmarks() ~ bookmarks(glob:"jjk/stash/*"))"#;
+
 /// User-facing result of a command: notes to print + any conflicts surfaced (never aborts; ARCH D4).
 #[derive(Debug, Default)]
 pub struct Report {
@@ -96,13 +99,18 @@ impl Engine {
     }
 
     /// Open an existing jjk repo by walking up from `cwd` to find `.jj`.
+    ///
+    /// Multi-workspace aware: the VCS is rooted at the **workspace** the user is in (so `@` is
+    /// that workspace's working copy — per-workspace current branch, ARCH §8/D3), while shared
+    /// `state.toml` is loaded from the **main** repo (resolved via `.jj/repo`).
     pub fn open(cwd: &Path) -> Result<Engine> {
         use crate::forge::gh_cli::GhCli;
         use crate::vcs::jj_cli::JjCli;
-        let root = find_repo_root(cwd).ok_or(JjkError::NotInitialized)?;
-        let state = State::load(&root)?;
+        let ws_root = find_workspace_root(cwd).ok_or(JjkError::NotInitialized)?;
+        let main_root = main_root_of(&ws_root)?;
+        let state = State::load(&main_root)?;
         let vcs: Box<dyn Vcs> = match state.config.vcs_backend.as_str() {
-            "jj_cli" => Box::new(JjCli::new(&root)),
+            "jj_cli" => Box::new(JjCli::new(&ws_root)),
             other => {
                 return Err(JjkError::Msg(format!(
                     "unknown vcs backend '{other}' (only 'jj_cli' is available)"
@@ -124,7 +132,7 @@ impl Engine {
                 .into())
             }
         };
-        Ok(Engine::new(root, vcs, Some(forge), state))
+        Ok(Engine::new(main_root, vcs, Some(forge), state))
     }
 
     /// Replace the forge adapter (used by tests to inject a fake).
@@ -155,12 +163,18 @@ impl Engine {
     /// The branch the working copy currently sits on (nearest local bookmark at-or-below `@`,
     /// excluding trunk). `None` means the working copy is on trunk.
     pub fn current_branch(&self) -> Result<Option<String>> {
-        let trunk = &self.state.config.trunk;
-        let res = self.vcs.resolve("heads(::@ & bookmarks())")?;
+        let res = self
+            .vcs
+            .resolve(&format!("heads(::@ & {STACK_BOOKMARKS})"))?;
         Ok(res
             .into_iter()
             .next()
-            .and_then(|c| c.local_bookmarks.into_iter().find(|b| b != trunk)))
+            .and_then(|c| c.local_bookmarks.into_iter().find(|b| self.is_stack_bookmark(b))))
+    }
+
+    /// Whether a bookmark is a stack branch (not trunk, not an internal stash bookmark).
+    fn is_stack_bookmark(&self, name: &str) -> bool {
+        name != self.state.config.trunk && !name.starts_with("jjk/stash/")
     }
 
     fn branch_tip(&self, name: &str) -> Result<ChangeId> {
@@ -178,7 +192,7 @@ impl Engine {
         let tip = branch_tip.as_str();
         let near = self
             .vcs
-            .resolve(&format!("roots(({tip}:: ~ {tip}) & bookmarks())"))?;
+            .resolve(&format!("roots(({tip}:: ~ {tip}) & {STACK_BOOKMARKS})"))?;
         let mut firsts = Vec::new();
         for b in near {
             let r = self
@@ -204,7 +218,7 @@ impl Engine {
 
         // Topmost bookmarked tip in the stack containing the current position.
         let upmost = self.vcs.resolve(&format!(
-            "heads(({cur_tip_revset}:: ~ {cur_tip_revset}) & bookmarks())"
+            "heads(({cur_tip_revset}:: ~ {cur_tip_revset}) & {STACK_BOOKMARKS})"
         ))?;
         let top_id = match upmost.into_iter().next() {
             Some(c) => c.change_id,
@@ -226,7 +240,7 @@ impl Engine {
         let mut acc: Vec<CommitInfo> = Vec::new();
         for c in commits {
             acc.push(c.clone());
-            if let Some(name) = c.local_bookmarks.iter().find(|b| **b != trunk_name) {
+            if let Some(name) = c.local_bookmarks.iter().find(|b| self.is_stack_bookmark(b)) {
                 let name = name.clone();
                 let pr = self.state.pr_of(&name);
                 let tracked = self.state.is_tracked(&name);
@@ -495,6 +509,174 @@ impl Engine {
             report.note("upstack reconnected to its parent");
         }
         self.collect_conflicts(&mut report)?;
+        Ok(report)
+    }
+
+    // ---------------------------------------------------------------- worktrees (jj workspaces)
+
+    /// `jjk worktree add <path> [name] [--branch B]` — create a jj workspace. The new workspace's
+    /// `@` starts as an empty child of `B`'s tip (or trunk). Great for parallel agents per branch.
+    pub fn worktree_add(
+        &self,
+        path: &Path,
+        name: Option<&str>,
+        branch: Option<&str>,
+    ) -> Result<Report> {
+        let mut report = Report::default();
+        let name = match name {
+            Some(n) => n.to_string(),
+            None => path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| JjkError::Msg("could not derive workspace name from path".into()))?
+                .to_string(),
+        };
+        let at = match branch {
+            Some(b) if b != self.state.config.trunk => self.branch_tip(b)?,
+            _ => self.trunk_anchor()?.1,
+        };
+        self.vcs.add_workspace(path, &name, &at)?;
+        report.note(format!("added workspace '{name}' at {}", path.display()));
+        if let Some(b) = branch {
+            report.note(format!("starting on '{b}'"));
+        }
+        Ok(report)
+    }
+
+    /// `jjk worktree list` — workspaces with their per-workspace current branch.
+    pub fn worktree_list(&self) -> Result<Vec<WorktreeRow>> {
+        let mut rows = Vec::new();
+        for ws in self.vcs.workspaces()? {
+            let current = self.branch_at(&format!("{}@", ws.name))?;
+            rows.push(WorktreeRow {
+                name: ws.name,
+                working_copy: ws.working_copy,
+                current_branch: current,
+                is_stale: ws.is_stale,
+            });
+        }
+        Ok(rows)
+    }
+
+    /// `jjk worktree remove <name>` — stop tracking a workspace (files are left on disk).
+    pub fn worktree_remove(&self, name: &str) -> Result<Report> {
+        let mut report = Report::default();
+        self.vcs.forget_workspace(name)?;
+        report.note(format!("removed workspace '{name}' (files left on disk)"));
+        Ok(report)
+    }
+
+    /// Nearest non-trunk local bookmark at-or-below the commit named by `at_revset` (e.g. `ws2@`).
+    fn branch_at(&self, at_revset: &str) -> Result<Option<String>> {
+        let res = self
+            .vcs
+            .resolve(&format!("heads(::{at_revset} & {STACK_BOOKMARKS})"))?;
+        Ok(res
+            .into_iter()
+            .next()
+            .and_then(|c| c.local_bookmarks.into_iter().find(|b| self.is_stack_bookmark(b))))
+    }
+
+    // ---------------------------------------------------------------- stash (muscle memory; D-§5)
+
+    /// `jjk stash` — park the working-copy changes aside on a `jjk/stash/N` bookmark and leave a
+    /// clean empty `@` in place. (Mostly unnecessary in jj since switching is safe.)
+    pub fn stash(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let wc = self.vcs.working_copy()?;
+        if wc.is_empty {
+            report.note("nothing to stash (working copy is clean)");
+            return Ok(report);
+        }
+        let parent = wc
+            .parents
+            .first()
+            .cloned()
+            .ok_or_else(|| JjkError::Msg("working copy has no parent to stash onto".into()))?;
+        let n = self.next_stash_number()?;
+        let name = format!("jjk/stash/{n}");
+        let wc_id = wc.change_id.clone();
+        let name_cl = name.clone();
+        self.vcs.transaction(&mut |tx| {
+            tx.create_bookmark(&name_cl, &wc_id)?; // park the changes
+            tx.new_child(&parent)?; // clean empty @ on the same parent
+            Ok(())
+        })?;
+        report.note(format!("stashed working copy as {name}"));
+        Ok(report)
+    }
+
+    /// `jjk stash pop` — restore the most recent stash into the current working copy.
+    pub fn stash_pop(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let stashes = self.list_stashes()?;
+        let (name, from) = stashes
+            .into_iter()
+            .max_by_key(|(_, _, n)| *n)
+            .map(|(name, id, _)| (name, id))
+            .ok_or_else(|| JjkError::Msg("no stash to pop".into()))?;
+        let into = self.vcs.working_copy()?.change_id;
+        let name_cl = name.clone();
+        self.vcs.transaction(&mut |tx| {
+            tx.squash(&from, &into)?; // restore changes into @ (abandons the now-empty stash)
+            tx.forget_bookmark(&name_cl)?; // bookmark slid to the parent; drop it (local-only)
+            Ok(())
+        })?;
+        report.note(format!("popped {name}"));
+        Ok(report)
+    }
+
+    fn list_stashes(&self) -> Result<Vec<(String, ChangeId, u64)>> {
+        let mut out = Vec::new();
+        for b in self.vcs.bookmarks()? {
+            if let Some(rest) = b.name.strip_prefix("jjk/stash/") {
+                if let Ok(n) = rest.parse::<u64>() {
+                    out.push((b.name.clone(), b.target, n));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn next_stash_number(&self) -> Result<u64> {
+        Ok(self
+            .list_stashes()?
+            .into_iter()
+            .map(|(_, _, n)| n)
+            .max()
+            .unwrap_or(0)
+            + 1)
+    }
+
+    // ---------------------------------------------------------------- conflict resolution helper
+
+    /// `jjk resolve` — open the lowest conflicted commit for editing (`jj edit`). The user edits
+    /// the files to resolve; the next jjk command re-snapshots and the resolution propagates to
+    /// descendants (JJ_NOTES §7). Then `jjk checkout <branch>` restores the empty-`@` invariant.
+    pub fn resolve(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let stack = self.derive_stack()?;
+        // Lowest conflicted commit across the stack (bottom→top).
+        let target = stack
+            .branches
+            .iter()
+            .flat_map(|b| b.commits.iter())
+            .find(|c| c.has_conflict)
+            .map(|c| c.change_id.clone());
+        match target {
+            None => {
+                report.note("no conflicts to resolve");
+            }
+            Some(id) => {
+                self.vcs.transaction(&mut |tx| tx.edit(&id))?;
+                report.note(format!("editing conflicted change {} — resolve the marked files,", id.short()));
+                report.note("then run any jjk command to re-snapshot; the fix propagates upstack.");
+                report.note("finally `jjk checkout <branch>` to restore a clean working copy.");
+            }
+        }
         Ok(report)
     }
 
@@ -826,8 +1008,17 @@ pub enum NavDir {
     Bottom,
 }
 
-/// Walk up from `cwd` to find the directory containing `.jj`.
-fn find_repo_root(cwd: &Path) -> Option<PathBuf> {
+/// A row for `jjk worktree list`.
+#[derive(Clone, Debug)]
+pub struct WorktreeRow {
+    pub name: String,
+    pub working_copy: ChangeId,
+    pub current_branch: Option<String>,
+    pub is_stale: bool,
+}
+
+/// Walk up from `cwd` to find the workspace root (nearest directory containing `.jj`).
+fn find_workspace_root(cwd: &Path) -> Option<PathBuf> {
     let mut cur = Some(cwd);
     while let Some(dir) = cur {
         if dir.join(".jj").exists() {
@@ -836,4 +1027,27 @@ fn find_repo_root(cwd: &Path) -> Option<PathBuf> {
         cur = dir.parent();
     }
     None
+}
+
+/// Resolve the **main** repo root from a workspace root. The main workspace has a `.jj/repo`
+/// directory; a secondary workspace has a `.jj/repo` *file* containing a path (relative to its
+/// `.jj/`) to the main repo's `.jj/repo` (JJ_NOTES / probed). Shared `state.toml` lives there.
+fn main_root_of(ws_root: &Path) -> Result<PathBuf> {
+    let repo = ws_root.join(".jj").join("repo");
+    let meta = std::fs::symlink_metadata(&repo)
+        .map_err(|e| JjkError::Msg(format!("cannot stat {}: {e}", repo.display())))?;
+    if meta.is_dir() {
+        return Ok(ws_root.to_path_buf());
+    }
+    // Secondary workspace: follow the pointer file to the main repo.
+    let target = std::fs::read_to_string(&repo)
+        .map_err(|e| JjkError::Msg(format!("cannot read {}: {e}", repo.display())))?;
+    let main_repo = ws_root.join(".jj").join(target.trim());
+    let main_root = main_repo
+        .parent() // .../main/.jj
+        .and_then(|p| p.parent()) // .../main
+        .ok_or_else(|| JjkError::Msg("could not resolve main repo root".into()))?;
+    main_root
+        .canonicalize()
+        .map_err(|e| JjkError::Msg(format!("canonicalize main root failed: {e}")).into())
 }

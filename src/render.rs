@@ -1,7 +1,7 @@
 //! Rendering for `jjk ls` (stack diagram) and `jjk status`.
 
 use crate::engine::stack::Stack;
-use crate::engine::Report;
+use crate::engine::{Report, WorktreeRow};
 
 /// Render the stack top → bottom (top printed first, trunk last), git-spice style.
 ///
@@ -60,6 +60,21 @@ pub fn render_position(stack: &Stack) -> String {
         }
         None => format!("on trunk '{}'", stack.trunk_name),
     }
+}
+
+/// Render `jjk worktree list`.
+pub fn render_worktrees(rows: &[WorktreeRow]) -> String {
+    let mut out = String::new();
+    for r in rows {
+        let branch = r.current_branch.as_deref().unwrap_or("(trunk)");
+        let stale = if r.is_stale { "  ⚠ stale" } else { "" };
+        out.push_str(&format!(
+            "{name}   on {branch}   @{wc}{stale}\n",
+            name = r.name,
+            wc = r.working_copy.short(),
+        ));
+    }
+    out
 }
 
 /// Print a [`Report`]'s notes and conflict summary to stdout/stderr.

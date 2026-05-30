@@ -87,6 +87,10 @@ pub trait VcsTx {
     /// Squash the working-copy (`@`) changes into `into` (amend). Descendants auto-rebase.
     fn squash_working_into(&mut self, into: &ChangeId) -> Result<()>;
 
+    /// Squash all changes from `from` into `into` (`jj squash --from --into`). `from` is abandoned
+    /// when it becomes empty; a bookmark on it moves to its parent (forget it separately).
+    fn squash(&mut self, from: &ChangeId, into: &ChangeId) -> Result<()>;
+
     /// `jj new <parent>`: create an empty child of `parent` and make it `@`. Returns its change id.
     fn new_child(&mut self, parent: &ChangeId) -> Result<ChangeId>;
 

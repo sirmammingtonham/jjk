@@ -303,7 +303,8 @@ impl Vcs for JjCli {
     }
 
     fn remotes(&self) -> Result<Vec<String>> {
-        let out = self.run(&["git", "remote", "list"])?;
+        // Config read; doesn't depend on `@`, so don't snapshot (tolerate a stale workspace).
+        let out = self.run(&["git", "remote", "list", "--ignore-working-copy"])?;
         Ok(out
             .lines()
             .filter_map(|l| l.split_whitespace().next())
@@ -313,8 +314,9 @@ impl Vcs for JjCli {
     }
 
     fn remote_url(&self, name: &str) -> Result<Option<String>> {
-        // `jj git remote list` prints `<name> <url>` per line.
-        let out = self.run(&["git", "remote", "list"])?;
+        // `jj git remote list` prints `<name> <url>` per line. `--ignore-working-copy` so opening
+        // the engine in a stale workspace doesn't error before recovery (JJ_NOTES §11).
+        let out = self.run(&["git", "remote", "list", "--ignore-working-copy"])?;
         Ok(out.lines().find_map(|l| {
             let mut it = l.split_whitespace();
             match (it.next(), it.next()) {
@@ -363,6 +365,12 @@ impl<'a> VcsTx for JjTx<'a> {
     fn squash_working_into(&mut self, into: &ChangeId) -> Result<()> {
         self.cli
             .run_with_stderr(&["squash", "--into", into.as_str()])?;
+        Ok(())
+    }
+
+    fn squash(&mut self, from: &ChangeId, into: &ChangeId) -> Result<()> {
+        self.cli
+            .run_with_stderr(&["squash", "--from", from.as_str(), "--into", into.as_str()])?;
         Ok(())
     }
 

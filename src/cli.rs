@@ -51,6 +51,16 @@ pub enum Command {
     /// Undo the last operation (jj op-log).
     Undo,
 
+    /// Manage parallel working trees (jj workspaces).
+    #[command(subcommand)]
+    Worktree(WorktreeCmd),
+
+    /// Park/unpark working-copy changes (muscle memory; switching is safe in jj).
+    Stash(StashArgs),
+
+    /// Open the lowest conflicted change to resolve it.
+    Resolve,
+
     /// Restack the upstack (usually a no-op with jj).
     Restack,
 
@@ -120,4 +130,37 @@ pub struct NameArg {
 #[derive(Args, Debug)]
 pub struct OptNameArg {
     pub name: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorktreeCmd {
+    /// Add a workspace at PATH (optionally named, optionally starting on a branch).
+    Add(WorktreeAddArgs),
+    /// List workspaces and their current branch.
+    List,
+    /// Stop tracking a workspace by name (files left on disk).
+    Remove(NameArg),
+}
+
+#[derive(Args, Debug)]
+pub struct WorktreeAddArgs {
+    /// Directory for the new workspace.
+    pub path: String,
+    /// Workspace name (default: directory basename).
+    pub name: Option<String>,
+    /// Start the workspace on this branch's tip (default: trunk).
+    #[arg(long)]
+    pub branch: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct StashArgs {
+    #[command(subcommand)]
+    pub action: Option<StashAction>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StashAction {
+    /// Restore the most recent stash into the working copy.
+    Pop,
 }

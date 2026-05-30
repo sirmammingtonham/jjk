@@ -3,7 +3,7 @@
 
 use anyhow::Context;
 use clap::Parser;
-use jjk::cli::{BranchCmd, Cli, Command, RepoCmd};
+use jjk::cli::{BranchCmd, Cli, Command, RepoCmd, StashAction, WorktreeCmd};
 use jjk::engine::{Engine, NavDir};
 use jjk::render;
 use std::process::ExitCode;
@@ -115,6 +115,35 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         Command::Bottom => render::print_report(&engine.navigate(NavDir::Bottom)?),
 
         Command::Undo => render::print_report(&engine.undo()?),
+
+        Command::Worktree(WorktreeCmd::Add(args)) => {
+            let report = engine.worktree_add(
+                std::path::Path::new(&args.path),
+                args.name.as_deref(),
+                args.branch.as_deref(),
+            )?;
+            render::print_report(&report);
+        }
+        Command::Worktree(WorktreeCmd::List) => {
+            let rows = engine.worktree_list()?;
+            print!("{}", render::render_worktrees(&rows));
+        }
+        Command::Worktree(WorktreeCmd::Remove(arg)) => {
+            render::print_report(&engine.worktree_remove(&arg.name)?);
+        }
+
+        Command::Stash(args) => {
+            let report = match args.action {
+                Some(StashAction::Pop) => engine.stash_pop()?,
+                None => engine.stash()?,
+            };
+            render::print_report(&report);
+        }
+
+        Command::Resolve => {
+            let report = engine.resolve()?;
+            render::print_report(&report);
+        }
 
         Command::Fetch => render::print_report(&engine.fetch()?),
         Command::Push => render::print_report(&engine.push_current()?),

@@ -28,7 +28,7 @@ cargo build --release
 | 2 | Stack derivation: `restack`, `track`/`untrack`, `branch delete` (heal-the-gap) | ✅ done |
 | 3 | Forge: `fetch`, `pull`, `push`, `submit` (idempotent, bottom-up bases) | ✅ done |
 | 4 | `sync` (merged-branch reconciliation; squash + merge-commit) | ✅ done |
-| 5 | Worktrees + polish | ⏳ next |
+| 5 | Worktrees (`jj workspace`), `stash`, `resolve`, per-workspace stale recovery | ✅ done |
 | 6 | Crate adapters (`jj-lib`/`octocrab`), optional | ⏳ |
 
 ## Quick start (Phase 1)
@@ -44,6 +44,8 @@ jjk branch create feat-b      # stack feat-b on top of feat-a
 jjk commit -m "feat-b work"
 jjk ls                        # show the stack
 jjk down                      # move to feat-a; edits here auto-restack feat-b
+jjk submit                    # open/update a stacked PR per branch (correct bases)
+jjk sync                      # after a PR merges: reconcile, rebase survivors, retarget, push
 jjk undo                      # reverse the last operation
 ```
 
@@ -66,18 +68,40 @@ jjk undo                      # reverse the last operation
 - A **mid-stack commit** auto-restacks the upstack (jj rebases descendants; conflicts are stored
   in commits, never halting).
 
+## Worktrees (parallel workspaces)
+
+Map git worktrees to `jj workspace` — all share one repo/op-log, each has its own working copy.
+Great for running several agents in parallel, each on a different branch.
+
+```sh
+jjk worktree add ../agent-b --branch feat-b   # new workspace started on feat-b
+jjk worktree list                              # each workspace + its own current branch
+jjk worktree remove agent-b                    # stop tracking (files left on disk)
+```
+
+The "current branch" is **per-workspace** (derived from that workspace's `@`). If a `sync`/`commit`
+in one workspace rewrites history, other workspaces' working copies are **automatically recovered**
+(`jj workspace update-stale`) the next time you run a `jjk` command there.
+
+## Stash
+
+Mostly unnecessary (switching branches is always safe in jj), provided for muscle memory:
+
+```sh
+jjk stash        # park working-copy changes on a jjk/stash/N bookmark; clean @
+jjk stash pop     # restore the most recent stash into the working copy
+```
+
 ## Conflicts (resolve flow)
 
 jj stores conflicts **inside commits** — operations complete rather than halting. When `jjk`
 reports `CONFLICT: N change(s) need resolution`:
 
-1. Switch to the conflicted branch and open its tip for editing (jj materializes conflict
-   markers in the affected files).
+1. `jjk resolve` opens the lowest conflicted change for editing (jj materializes conflict markers
+   in the affected files).
 2. Edit the files to resolve; the next `jjk` command re-snapshots the working copy and the
    resolution **propagates to descendants** automatically.
-3. `jjk status` confirms the conflicts are cleared.
-
-(A dedicated `jjk resolve` helper lands with later phases; today use `jj edit <tip>` then edit.)
+3. `jjk checkout <branch>` restores a clean working copy; `jjk status` confirms it's resolved.
 
 ## Development
 
