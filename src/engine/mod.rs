@@ -31,18 +31,26 @@ impl Report {
 pub struct Engine {
     root: PathBuf,
     vcs: Box<dyn Vcs>,
-    #[allow(dead_code)]
-    forge: Option<Box<dyn Forge>>,
     state: State,
+    forge_backend: String,
+    /// Lazily built: forge construction queries the remote, so local commands (ls/commit/…) that
+    /// never touch the forge don't pay for it.
+    forge: std::cell::OnceCell<Box<dyn Forge>>,
 }
 
 impl Engine {
-    pub fn new(root: PathBuf, vcs: Box<dyn Vcs>, forge: Option<Box<dyn Forge>>, state: State) -> Self {
+    pub fn new(
+        root: PathBuf,
+        vcs: Box<dyn Vcs>,
+        forge_backend: impl Into<String>,
+        state: State,
+    ) -> Self {
         Self {
             root,
             vcs,
-            forge,
             state,
+            forge_backend: forge_backend.into(),
+            forge: std::cell::OnceCell::new(),
         }
     }
 
@@ -104,7 +112,6 @@ impl Engine {
     /// that workspace's working copy — per-workspace current branch, ARCH §8/D3), while shared
     /// `state.toml` is loaded from the **main** repo (resolved via `.jj/repo`).
     pub fn open(cwd: &Path) -> Result<Engine> {
-        use crate::forge::gh_cli::GhCli;
         use crate::vcs::jj_cli::JjCli;
         let ws_root = find_workspace_root(cwd).ok_or(JjkError::NotInitialized)?;
         let main_root = main_root_of(&ws_root)?;
@@ -118,32 +125,39 @@ impl Engine {
                 .into())
             }
         };
-        let forge: Box<dyn Forge> = match state.config.forge_backend.as_str() {
-            "gh_cli" => {
-                let slug = vcs
-                    .remote_url(&state.config.remote)?
-                    .and_then(|u| GhCli::slug_from_url(&u));
-                Box::new(GhCli::new(slug))
-            }
-            other => {
-                return Err(JjkError::Msg(format!(
-                    "unknown forge backend '{other}' (only 'gh_cli' is available)"
-                ))
-                .into())
-            }
-        };
-        Ok(Engine::new(main_root, vcs, Some(forge), state))
+        let forge_backend = state.config.forge_backend.clone();
+        Ok(Engine::new(main_root, vcs, forge_backend, state))
     }
 
     /// Replace the forge adapter (used by tests to inject a fake).
     pub fn set_forge(&mut self, forge: Box<dyn Forge>) {
-        self.forge = Some(forge);
+        self.forge = std::cell::OnceCell::from(forge);
     }
 
+    /// The forge, built on first use (querying the remote only when a forge command runs).
     fn forge(&self) -> Result<&dyn Forge> {
-        self.forge
-            .as_deref()
-            .ok_or_else(|| JjkError::Msg("no forge configured".into()).into())
+        if self.forge.get().is_none() {
+            let f = self.build_forge()?;
+            let _ = self.forge.set(f);
+        }
+        Ok(self.forge.get().expect("just initialized").as_ref())
+    }
+
+    fn build_forge(&self) -> Result<Box<dyn Forge>> {
+        use crate::forge::gh_cli::GhCli;
+        match self.forge_backend.as_str() {
+            "gh_cli" => {
+                let slug = self
+                    .vcs
+                    .remote_url(&self.state.config.remote)?
+                    .and_then(|u| GhCli::slug_from_url(&u));
+                Ok(Box::new(GhCli::new(slug)))
+            }
+            other => Err(JjkError::Msg(format!(
+                "unknown forge backend '{other}' (only 'gh_cli' is available)"
+            ))
+            .into()),
+        }
     }
 
     // ---------------------------------------------------------------- derivation
@@ -152,24 +166,43 @@ impl Engine {
     /// falls back to root() with no remote — JJ_NOTES §8); falls back to the `trunk()` revset.
     fn trunk_anchor(&self) -> Result<(String, ChangeId)> {
         let tname = self.state.config.trunk.clone();
-        if let Some(bm) = self.vcs.bookmarks()?.into_iter().find(|b| b.name == tname) {
-            Ok((tname, bm.target))
+        if let Some(id) = self.resolve_bookmark(&tname)? {
+            Ok((tname, id))
         } else {
             let id = self.vcs.trunk()?;
             Ok(("trunk()".to_string(), id))
         }
     }
 
+    /// Resolve a single local bookmark to its target change id, if it exists. Targeted query
+    /// (`bookmarks(exact:..)`) rather than scanning every bookmark in the repo.
+    fn resolve_bookmark(&self, name: &str) -> Result<Option<ChangeId>> {
+        Ok(self
+            .vcs
+            .resolve(&format!("bookmarks(exact:{name:?})"))?
+            .into_iter()
+            .next()
+            .map(|c| c.change_id))
+    }
+
     /// The branch the working copy currently sits on (nearest local bookmark at-or-below `@`,
     /// excluding trunk). `None` means the working copy is on trunk.
     pub fn current_branch(&self) -> Result<Option<String>> {
+        Ok(self.current_branch_tip()?.map(|(name, _)| name))
+    }
+
+    /// The current branch's name **and** tip change id in one query (the nearest stack bookmark
+    /// at-or-below `@`). Avoids a second `branch_tip` lookup for callers that need both.
+    fn current_branch_tip(&self) -> Result<Option<(String, ChangeId)>> {
         let res = self
             .vcs
             .resolve(&format!("heads(::@ & {STACK_BOOKMARKS})"))?;
-        Ok(res
-            .into_iter()
-            .next()
-            .and_then(|c| c.local_bookmarks.into_iter().find(|b| self.is_stack_bookmark(b))))
+        Ok(res.into_iter().next().and_then(|c| {
+            c.local_bookmarks
+                .iter()
+                .find(|b| self.is_stack_bookmark(b))
+                .map(|name| (name.clone(), c.change_id.clone()))
+        }))
     }
 
     /// Whether a bookmark is a stack branch (not trunk, not an internal stash bookmark).
@@ -178,11 +211,7 @@ impl Engine {
     }
 
     fn branch_tip(&self, name: &str) -> Result<ChangeId> {
-        self.vcs
-            .bookmarks()?
-            .into_iter()
-            .find(|b| b.name == name)
-            .map(|b| b.target)
+        self.resolve_bookmark(name)?
             .ok_or_else(|| JjkError::UnknownBranch(name.to_string()).into())
     }
 
@@ -208,25 +237,23 @@ impl Engine {
     /// Reconstruct the stack containing `@` from jj. Bottom (nearest trunk) → top.
     pub fn derive_stack(&self) -> Result<Stack> {
         let (trunk_revset, trunk_id) = self.trunk_anchor()?;
-        let current = self.current_branch()?;
+        let cur = self.current_branch_tip()?;
+        let current = cur.as_ref().map(|(n, _)| n.clone());
 
         // Anchor for the "upstack" search: the current branch tip, or trunk if on trunk.
-        let cur_tip_revset = match &current {
-            Some(b) => b.clone(),
-            None => trunk_revset.clone(),
-        };
+        let cur_tip_id = cur.as_ref().map(|(_, id)| id.clone()).unwrap_or_else(|| trunk_id.clone());
+        let cur_tip = cur_tip_id.as_str();
 
-        // Topmost bookmarked tip in the stack containing the current position.
-        let upmost = self.vcs.resolve(&format!(
-            "heads(({cur_tip_revset}:: ~ {cur_tip_revset}) & {STACK_BOOKMARKS})"
-        ))?;
-        let top_id = match upmost.into_iter().next() {
-            Some(c) => c.change_id,
-            None => match &current {
-                Some(b) => self.branch_tip(b)?,
-                None => trunk_id.clone(),
-            },
-        };
+        // Topmost bookmarked tip in the stack containing the current position; if none, the current
+        // branch tip itself (reusing the id we already resolved — no extra query).
+        let upmost = self
+            .vcs
+            .resolve(&format!("heads(({cur_tip}:: ~ {cur_tip}) & {STACK_BOOKMARKS})"))?;
+        let top_id = upmost
+            .into_iter()
+            .next()
+            .map(|c| c.change_id)
+            .unwrap_or(cur_tip_id);
 
         // Mutable ancestry from trunk (exclusive) up to top (inclusive), newest-first → reverse.
         // `& mutable()` excludes already-merged / shared (immutable) commits, which are part of
@@ -271,6 +298,11 @@ impl Engine {
 
     /// Auto-recover a stale working copy before any command that reads `@` (ARCH §8/§12).
     fn ensure_fresh(&self, report: &mut Report) -> Result<()> {
+        // Staleness can only happen across multiple workspaces. With one workspace, skip the
+        // (snapshotting, and therefore expensive) `jj status` check entirely.
+        if self.vcs.workspace_count()? <= 1 {
+            return Ok(());
+        }
         if self.vcs.is_stale()? {
             self.vcs.update_stale()?;
             report.note("recovered stale working copy (jj workspace update-stale)");
@@ -284,10 +316,7 @@ impl Engine {
     pub fn commit(&mut self, message: &str) -> Result<Report> {
         let mut report = Report::default();
         self.ensure_fresh(&mut report)?;
-        let branch = self
-            .current_branch()?
-            .ok_or(JjkError::NotOnBranch)?;
-        let old_tip = self.branch_tip(&branch)?;
+        let (branch, old_tip) = self.current_branch_tip()?.ok_or(JjkError::NotOnBranch)?;
         let upstack_firsts = self.upstack_first_commits(&old_tip)?;
 
         let branch_cl = branch.clone();
@@ -319,8 +348,7 @@ impl Engine {
     pub fn commit_amend(&mut self, message: Option<&str>) -> Result<Report> {
         let mut report = Report::default();
         self.ensure_fresh(&mut report)?;
-        let branch = self.current_branch()?.ok_or(JjkError::NotOnBranch)?;
-        let tip = self.branch_tip(&branch)?;
+        let (branch, tip) = self.current_branch_tip()?.ok_or(JjkError::NotOnBranch)?;
         let msg = message.map(|s| s.to_string());
         self.vcs.transaction(&mut |tx| {
             tx.squash_working_into(&tip)?;
@@ -587,7 +615,8 @@ impl Engine {
     pub fn stash(&mut self) -> Result<Report> {
         let mut report = Report::default();
         self.ensure_fresh(&mut report)?;
-        let wc = self.vcs.working_copy()?;
+        // Snapshot so on-disk edits are seen before deciding whether there's anything to stash.
+        let wc = self.vcs.snapshot()?;
         if wc.is_empty {
             report.note("nothing to stash (working copy is clean)");
             return Ok(report);

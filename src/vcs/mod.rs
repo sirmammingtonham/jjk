@@ -31,8 +31,14 @@ pub trait Vcs {
     /// Resolve a (neutral subset) revset into commits, newest-first as jj logs them.
     fn resolve(&self, revset: &str) -> Result<Vec<CommitInfo>>;
 
-    /// The current workspace's working-copy commit (`@`).
+    /// The current workspace's working-copy commit (`@`). Reads are non-snapshotting (fast); call
+    /// [`snapshot`](Vcs::snapshot) first if you need `@` to reflect on-disk edits.
     fn working_copy(&self) -> Result<CommitInfo>;
+
+    /// Snapshot the working copy (capturing on-disk edits) and return the resulting `@`. Reads
+    /// otherwise skip snapshotting for speed (snapshotting a large tree is the dominant per-call
+    /// cost), so call this when `@` must reflect current edits.
+    fn snapshot(&self) -> Result<CommitInfo>;
 
     /// All local bookmarks.
     fn bookmarks(&self) -> Result<Vec<Bookmark>>;
@@ -52,6 +58,8 @@ pub trait Vcs {
     // ---- workspaces ----
 
     fn workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
+    /// Number of workspaces (cheap; non-snapshotting). Staleness is only possible with >1.
+    fn workspace_count(&self) -> Result<usize>;
     fn add_workspace(&self, path: &Path, name: &str, at: &ChangeId) -> Result<()>;
     fn forget_workspace(&self, name: &str) -> Result<()>;
     /// Update a stale workspace's working copy. No-op (Ok) if not stale.

@@ -112,8 +112,9 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         }
 
         Command::Status => {
+            // One snapshotting read of @ (detects uncommitted edits); the rest are non-snapshotting.
+            let wc = engine.vcs().snapshot()?;
             let stack = engine.derive_stack()?;
-            let wc = engine.vcs().working_copy()?;
             println!("{}", render::render_position(&stack));
             if wc.is_empty {
                 println!("working copy is clean (empty @)");
@@ -121,9 +122,9 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
                 println!("working copy has uncommitted changes");
             }
             print!("{}", render::render_ls(&stack));
-            if engine.has_conflicts()? {
+            if stack.branches.iter().any(|b| b.has_conflict()) {
                 conflicts = true;
-                eprintln!("\nThis stack has conflicts; run the resolve flow (see README).");
+                eprintln!("\nThis stack has conflicts; run `jjk resolve`.");
             }
         }
         Command::Ls => {

@@ -126,17 +126,21 @@ impl JjCli {
         Ok((String::from_utf8_lossy(&out.stdout).into_owned(), stderr))
     }
 
-    /// Templated log over a revset → neutral commits.
+    /// Templated log over a revset → neutral commits. Uses `--ignore-working-copy` so reads don't
+    /// re-snapshot the working tree (the dominant per-call cost in large repos). Commands that need
+    /// `@` to reflect on-disk edits call [`Vcs::snapshot`] first; mutating jj commands snapshot on
+    /// their own.
     fn log(&self, revset: &str) -> Result<Vec<CommitInfo>> {
-        let stdout = self.run(&[
-            "log",
-            "--no-graph",
-            "--color=never",
-            "-r",
-            revset,
-            "-T",
-            COMMIT_TEMPLATE,
-        ])?;
+        self.log_inner(revset, true)
+    }
+
+    fn log_inner(&self, revset: &str, ignore_wc: bool) -> Result<Vec<CommitInfo>> {
+        let mut args = vec!["log", "--no-graph"];
+        if ignore_wc {
+            args.push("--ignore-working-copy");
+        }
+        args.extend(["--color=never", "-r", revset, "-T", COMMIT_TEMPLATE]);
+        let stdout = self.run(&args)?;
         stdout
             .lines()
             .filter(|l| !l.is_empty())
@@ -229,6 +233,14 @@ impl Vcs for JjCli {
             .ok_or_else(|| anyhow!("could not resolve working-copy commit @"))
     }
 
+    fn snapshot(&self) -> Result<CommitInfo> {
+        // A log of `@` WITHOUT `--ignore-working-copy` snapshots the tree and returns the fresh `@`.
+        self.log_inner("@", false)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("could not resolve working-copy commit @"))
+    }
+
     fn bookmarks(&self) -> Result<Vec<Bookmark>> {
         // Derive from a log over bookmarked commits; `bookmarks()` revset is local-only (JJ_NOTES §1).
         let mut out = Vec::new();
@@ -241,6 +253,11 @@ impl Vcs for JjCli {
             }
         }
         Ok(out)
+    }
+
+    fn workspace_count(&self) -> Result<usize> {
+        let out = self.run(&["workspace", "list", "--ignore-working-copy", "--color=never"])?;
+        Ok(out.lines().filter(|l| l.contains(':')).count())
     }
 
     fn transaction(&self, f: &mut dyn FnMut(&mut dyn VcsTx) -> Result<()>) -> Result<()> {
