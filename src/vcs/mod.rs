@@ -66,6 +66,8 @@ pub trait Vcs {
     fn add_remote(&self, name: &str, url: &str) -> Result<()>;
     /// Names of configured remotes (excludes the colocated `git` pseudo-remote).
     fn remotes(&self) -> Result<Vec<String>>;
+    /// URL of a configured remote, if present.
+    fn remote_url(&self, name: &str) -> Result<Option<String>>;
 }
 
 /// Mutation handle yielded inside [`Vcs::transaction`].

@@ -97,6 +97,7 @@ impl Engine {
 
     /// Open an existing jjk repo by walking up from `cwd` to find `.jj`.
     pub fn open(cwd: &Path) -> Result<Engine> {
+        use crate::forge::gh_cli::GhCli;
         use crate::vcs::jj_cli::JjCli;
         let root = find_repo_root(cwd).ok_or(JjkError::NotInitialized)?;
         let state = State::load(&root)?;
@@ -109,7 +110,32 @@ impl Engine {
                 .into())
             }
         };
-        Ok(Engine::new(root, vcs, None, state))
+        let forge: Box<dyn Forge> = match state.config.forge_backend.as_str() {
+            "gh_cli" => {
+                let slug = vcs
+                    .remote_url(&state.config.remote)?
+                    .and_then(|u| GhCli::slug_from_url(&u));
+                Box::new(GhCli::new(slug))
+            }
+            other => {
+                return Err(JjkError::Msg(format!(
+                    "unknown forge backend '{other}' (only 'gh_cli' is available)"
+                ))
+                .into())
+            }
+        };
+        Ok(Engine::new(root, vcs, Some(forge), state))
+    }
+
+    /// Replace the forge adapter (used by tests to inject a fake).
+    pub fn set_forge(&mut self, forge: Box<dyn Forge>) {
+        self.forge = Some(forge);
+    }
+
+    fn forge(&self) -> Result<&dyn Forge> {
+        self.forge
+            .as_deref()
+            .ok_or_else(|| JjkError::Msg("no forge configured".into()).into())
     }
 
     // ---------------------------------------------------------------- derivation
@@ -522,6 +548,152 @@ impl Engine {
         report.note(format!("pushed {branch}"));
         Ok(report)
     }
+
+    /// `jjk pull` — fetch trunk and rebase the current stack onto it. **No** merged-PR detection
+    /// (that's `sync`). The local trunk bookmark fast-forwards on fetch (JJ_NOTES §9).
+    pub fn pull(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        self.vcs.fetch(&self.state.config.remote)?;
+        report.note(format!("fetched {}", self.state.config.remote));
+        self.ensure_fresh(&mut report)?;
+        let moved = self.rebase_stack_onto_trunk()?;
+        if moved > 0 {
+            report.note(format!("rebased {moved} stack root(s) onto trunk"));
+        } else {
+            report.note("stack already on latest trunk");
+        }
+        self.collect_conflicts(&mut report)?;
+        Ok(report)
+    }
+
+    /// Rebase the roots of the current stack (`roots(trunk()..top)`) onto trunk. Landing-method
+    /// agnostic: only commits not already in trunk's ancestry move (JJ_NOTES §9c). Returns the
+    /// number of roots rebased.
+    fn rebase_stack_onto_trunk(&self) -> Result<usize> {
+        let (trunk_revset, trunk_id) = self.trunk_anchor()?;
+        let stack = self.derive_stack()?;
+        let Some(top) = stack.top() else {
+            return Ok(0);
+        };
+        let roots = self.vcs.resolve(&format!(
+            "roots({}..{})",
+            trunk_revset,
+            top.tip.as_str()
+        ))?;
+        if roots.is_empty() {
+            return Ok(0);
+        }
+        // Skip roots already parented on trunk (no-op rebases).
+        let to_move: Vec<ChangeId> = roots
+            .into_iter()
+            .filter(|r| !r.parents.contains(&trunk_id))
+            .map(|r| r.change_id)
+            .collect();
+        if to_move.is_empty() {
+            return Ok(0);
+        }
+        let n = to_move.len();
+        self.vcs.transaction(&mut |tx| {
+            for r in &to_move {
+                tx.rebase(r, &trunk_id)?;
+            }
+            Ok(())
+        })?;
+        Ok(n)
+    }
+
+    /// `jjk submit` — push tracked branches bottom-up and create/update their PRs with correct
+    /// bases (downstack tracked branch, or trunk for the bottom). Idempotent.
+    pub async fn submit(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report)?;
+        let stack = self.derive_stack()?;
+        let remote = self.state.config.remote.clone();
+        let trunk_name = stack.trunk_name.clone();
+
+        // Build an owned plan (name, base, title, body) for tracked branches, bottom→top.
+        struct Item {
+            name: String,
+            base: String,
+            title: String,
+            body: String,
+        }
+        let mut plan: Vec<Item> = Vec::new();
+        let mut prev_tracked: Option<String> = None;
+        for b in stack.branches.iter().filter(|b| b.tracked) {
+            let base = prev_tracked.clone().unwrap_or_else(|| trunk_name.clone());
+            let title = b
+                .commits
+                .first()
+                .map(|c| c.subject().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| b.name.clone());
+            let body = pr_body(b, &base);
+            plan.push(Item {
+                name: b.name.clone(),
+                base,
+                title,
+                body,
+            });
+            prev_tracked = Some(b.name.clone());
+        }
+        drop(stack);
+
+        if plan.is_empty() {
+            report.note("no tracked branches to submit");
+            return Ok(report);
+        }
+
+        // 1. Push every tracked branch (bottom-up) so the remote has the heads + bases.
+        for item in &plan {
+            self.vcs.push(&remote, &item.name, PushOpts::default())?;
+        }
+        report.note(format!("pushed {} branch(es)", plan.len()));
+
+        // 2. Create or update each PR, bottom-up. get_pr (by head branch) makes this idempotent
+        // even if state.toml is missing the PR number.
+        for item in &plan {
+            let existing = self.forge()?.get_pr(&item.name).await?;
+            match existing {
+                Some(pr) => {
+                    self.forge()?
+                        .update_pr(pr.number, Some(&item.base), Some(&item.body))
+                        .await?;
+                    self.state.branch_mut(&item.name).pr = Some(pr.number);
+                    report.note(format!(
+                        "updated #{} {} (base {})",
+                        pr.number, item.name, item.base
+                    ));
+                }
+                None => {
+                    let pr = self
+                        .forge()?
+                        .create_pr(&item.name, &item.base, &item.title, &item.body)
+                        .await?;
+                    self.state.branch_mut(&item.name).pr = Some(pr.number);
+                    report.note(format!(
+                        "created #{} {} (base {})",
+                        pr.number, item.name, item.base
+                    ));
+                }
+            }
+        }
+        self.state.save(&self.root)?;
+        Ok(report)
+    }
+}
+
+/// PR body: a small jjk-managed marker plus the branch's commit subjects and its base.
+fn pr_body(branch: &Branch, base: &str) -> String {
+    let mut body = String::from("Managed by jjk (stacked PR).\n\n");
+    body.push_str(&format!("Base: `{base}`\n\nCommits:\n"));
+    for c in &branch.commits {
+        let subj = c.subject();
+        if !subj.is_empty() {
+            body.push_str(&format!("- {subj}\n"));
+        }
+    }
+    body
 }
 
 #[derive(Clone, Copy, Debug)]

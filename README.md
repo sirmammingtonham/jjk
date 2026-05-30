@@ -26,8 +26,8 @@ cargo build --release
 | 0 | jj behavior probe (`JJ_NOTES.md`) | ✅ done |
 | 1 | Local feel: `repo init`, `commit`, `commit --amend`, `branch create`, `checkout [-b]`, `status`, `ls`, `up`/`down`/`top`/`bottom`, `undo` | ✅ done |
 | 2 | Stack derivation: `restack`, `track`/`untrack`, `branch delete` (heal-the-gap) | ✅ done |
-| 3 | Forge: `fetch`, `pull`, `push`, `submit` | ⏳ next |
-| 4 | `sync` (merged-branch reconciliation) | ⏳ |
+| 3 | Forge: `fetch`, `pull`, `push`, `submit` (idempotent, bottom-up bases) | ✅ done |
+| 4 | `sync` (merged-branch reconciliation) | ⏳ next |
 | 5 | Worktrees + polish | ⏳ |
 | 6 | Crate adapters (`jj-lib`/`octocrab`), optional | ⏳ |
 

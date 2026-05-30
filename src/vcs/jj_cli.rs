@@ -306,6 +306,18 @@ impl Vcs for JjCli {
             .map(|r| r.to_string())
             .collect())
     }
+
+    fn remote_url(&self, name: &str) -> Result<Option<String>> {
+        // `jj git remote list` prints `<name> <url>` per line.
+        let out = self.run(&["git", "remote", "list"])?;
+        Ok(out.lines().find_map(|l| {
+            let mut it = l.split_whitespace();
+            match (it.next(), it.next()) {
+                (Some(n), Some(url)) if n == name => Some(url.to_string()),
+                _ => None,
+            }
+        }))
+    }
 }
 
 impl JjCli {

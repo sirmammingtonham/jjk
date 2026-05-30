@@ -119,8 +119,15 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         Command::Fetch => render::print_report(&engine.fetch()?),
         Command::Push => render::print_report(&engine.push_current()?),
 
-        Command::Pull => anyhow::bail!("`pull` is implemented in Phase 3"),
-        Command::Submit => anyhow::bail!("`submit` is implemented in Phase 3"),
+        Command::Pull => {
+            let report = engine.pull()?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
+        }
+        Command::Submit => {
+            let report = engine.submit().await?;
+            render::print_report(&report);
+        }
         Command::Sync => anyhow::bail!("`sync` is implemented in Phase 4"),
 
         // Handled before reaching here.
