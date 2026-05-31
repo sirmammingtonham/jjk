@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::model::{
     Bookmark, Capabilities, ChangeId, CommitId, CommitInfo, RemoteRef, WorkspaceInfo,
 };
-use crate::vcs::{PushOpts, Vcs, VcsTx};
+use crate::vcs::{CommitScope, PushOpts, Vcs, VcsTx};
 use anyhow::{anyhow, Context};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -253,6 +253,24 @@ impl Vcs for JjCli {
         self.run(&["diff", "--ignore-working-copy", "--color=never", "-r", revset])
     }
 
+    fn staged_paths(&self) -> Result<Vec<String>> {
+        // Query the colocated git index directly (jj doesn't touch it). Paths are root-relative.
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["diff", "--cached", "--name-only", "-z"])
+            .output()
+            .context("failed to spawn `git`")?;
+        if !out.status.success() {
+            return Ok(vec![]); // not colocated / no index — treat as nothing staged
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect())
+    }
+
     fn resolve(&self, revset: &str) -> Result<Vec<CommitInfo>> {
         self.log(revset)
     }
@@ -404,7 +422,7 @@ impl Vcs for JjCli {
         Ok(())
     }
 
-    fn run_pre_commit_hook(&self) -> Result<()> {
+    fn run_pre_commit_hook(&self, scope: &CommitScope) -> Result<()> {
         // Resolve the hook path, honouring core.hooksPath and the git-dir location.
         let out = Command::new("git")
             .arg("-C")
@@ -420,13 +438,22 @@ impl Vcs for JjCli {
         if !is_executable(&hook) {
             return Ok(());
         }
-        // Stage the working changes so index-based hooks (`git diff --cached`) see them. jj reads
-        // the working tree, not the index, so this doesn't affect the commit jj will make.
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(["add", "-A"])
-            .output();
+        // Stage the in-scope changes so index-based hooks (`git diff --cached`) see exactly what
+        // will be committed. jj reads the working tree, not the index, so this doesn't affect the
+        // commit jj makes. `Paths` stages just those files (so a partially-staged file is promoted
+        // to its whole working-tree content, matching jj's file-granularity commit).
+        let mut add = Command::new("git");
+        add.arg("-C").arg(&self.root).arg("add");
+        match scope {
+            CommitScope::Paths(paths) => {
+                add.arg("--");
+                add.args(paths);
+            }
+            CommitScope::All | CommitScope::Interactive => {
+                add.arg("-A");
+            }
+        }
+        let _ = add.output();
         // Run the hook from the repo root, inheriting the terminal.
         let status = Command::new(&hook)
             .current_dir(&self.root)
@@ -490,7 +517,31 @@ struct JjTx<'a> {
 
 impl<'a> VcsTx for JjTx<'a> {
     fn finalize_working_copy(&mut self, message: &str) -> Result<ChangeId> {
-        self.cli.run_with_stderr(&["commit", "-m", message])?;
+        self.finalize_working_copy_scoped(message, &CommitScope::All)
+    }
+
+    fn finalize_working_copy_scoped(
+        &mut self,
+        message: &str,
+        scope: &CommitScope,
+    ) -> Result<ChangeId> {
+        match scope {
+            CommitScope::All => {
+                self.cli.run_with_stderr(&["commit", "-m", message])?;
+            }
+            CommitScope::Interactive => {
+                // Opens jj's diff editor; needs the terminal. Unselected changes stay in the new @.
+                self.cli.run_interactive(&["commit", "-i", "-m", message])?;
+            }
+            CommitScope::Paths(paths) => {
+                // Anchor each path at the workspace root (jj resolves bare paths against CWD, but
+                // ours are root-relative); only these filesets are finalized into @-.
+                let mut args = vec!["commit".to_string(), "-m".to_string(), message.to_string()];
+                args.extend(paths.iter().map(|p| format!("root:\"{p}\"")));
+                let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                self.cli.run_with_stderr(&argv)?;
+            }
+        }
         // The finalized commit is now @-.
         self.cli
             .log("@-")?

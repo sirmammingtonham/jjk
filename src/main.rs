@@ -8,6 +8,8 @@ use jjk::cli::{
 };
 use jjk::engine::{Engine, NavDir, SubmitScope};
 use jjk::render;
+use jjk::vcs::CommitScope;
+use std::path::Path;
 use std::process::ExitCode;
 
 #[tokio::main]
@@ -52,6 +54,19 @@ fn mutates(command: &Command) -> bool {
     )
 }
 
+/// Resolve a user-supplied path (relative to the current directory) to a repo-root-relative string,
+/// so it can be anchored with jj's `root:` fileset regardless of where jjk was invoked. Falls back
+/// to the path as typed if it can't be made relative to the root.
+fn to_root_relative(cwd: &Path, root: &Path, p: &str) -> String {
+    let pb = Path::new(p);
+    let abs = if pb.is_absolute() { pb.to_path_buf() } else { cwd.join(pb) };
+    let abs = abs.canonicalize().unwrap_or(abs);
+    match abs.strip_prefix(root) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => p.to_string(),
+    }
+}
+
 /// True when the invocation is the top-level help (bare `jjk`, `jjk help`, `jjk --help`, `jjk -h`).
 fn wants_top_level_help() -> bool {
     match std::env::args().nth(1) {
@@ -71,8 +86,9 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
         }
 
         Command::Add => {
-            println!("jjk has no staging area — `jjk commit -m` commits all current changes.");
-            println!("(Save incremental progress with multiple commits; see `jjk commit --help`.)");
+            println!("jjk has no staging area of its own, but it respects git's: `git add` some");
+            println!("files and `jjk commit` will commit just those. With nothing staged it commits");
+            println!("everything; `jjk commit <paths>` or `jjk commit -i` also scope a commit.");
             Ok(ExitCode::SUCCESS)
         }
 
@@ -93,25 +109,58 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
 
     match command {
         Command::Commit(args) => {
-            // Run the git pre-commit hook (git semantics) for paths that commit working changes,
-            // unless --no-verify. Restructuring paths (--split/--pick) don't take new content.
-            let runs_hook = args.fixup.is_some() || args.amend || (!args.split && args.pick.is_none());
-            if runs_hook && !args.no_verify {
-                engine.run_pre_commit()?;
+            // `-i`/<paths> scope only the plain commit path; reject them on the restructuring verbs.
+            if (args.interactive || !args.paths.is_empty())
+                && (args.fixup.is_some() || args.amend || args.split || args.pick.is_some())
+            {
+                anyhow::bail!("`-i`/<paths> can't be combined with --amend/--fixup/--split/--pick");
             }
+
             let report = if let Some(target) = args.fixup.as_deref() {
+                if !args.no_verify {
+                    engine.run_pre_commit(&CommitScope::All)?;
+                }
                 engine.commit_fixup(target)?
             } else if args.split {
+                // Restructuring (no new content) — no hook.
                 engine.commit_split()?
             } else if let Some(rev) = args.pick.as_deref() {
                 engine.commit_pick(rev)?
             } else if args.amend {
+                if !args.no_verify {
+                    engine.run_pre_commit(&CommitScope::All)?;
+                }
                 engine.commit_amend(args.message.as_deref())?
             } else {
+                // Resolve what to commit: -i wins, then explicit paths, then git-staged files,
+                // else the whole working copy.
+                let scope = if args.interactive {
+                    CommitScope::Interactive
+                } else if !args.paths.is_empty() {
+                    let root = engine.root().to_path_buf();
+                    CommitScope::Paths(
+                        args.paths.iter().map(|p| to_root_relative(cwd, &root, p)).collect(),
+                    )
+                } else {
+                    let staged = engine.staged_paths()?;
+                    if staged.is_empty() {
+                        CommitScope::All
+                    } else {
+                        CommitScope::Paths(staged)
+                    }
+                };
+                if !args.no_verify {
+                    engine.run_pre_commit(&scope)?;
+                }
                 let msg = args
                     .message
                     .ok_or_else(|| anyhow::anyhow!("commit requires -m <message>"))?;
-                engine.commit(&msg)?
+                if let CommitScope::Paths(p) = &scope {
+                    if args.paths.is_empty() {
+                        eprintln!("committing {} staged file(s)", p.len());
+                    }
+                }
+                engine.commit_scoped(&msg, &scope)?
             };
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);

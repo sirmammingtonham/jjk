@@ -85,7 +85,7 @@ pub enum Command {
     /// Fetch trunk, reconcile merged branches, rebase the stack, then push & retarget PRs.
     Sync(SyncArgs),
 
-    /// The friendly "no staging area needed" note (D1).
+    /// Friendly note: jjk has no staging area of its own but honors git's (D1).
     Add,
 }
 
@@ -122,9 +122,16 @@ pub struct CommitArgs {
     /// Copy a commit (e.g. from an upstack branch) onto the current branch.
     #[arg(long, value_name = "REV")]
     pub pick: Option<String>,
+    /// Interactively choose what to commit (diff editor); the rest stays uncommitted.
+    #[arg(short = 'i', long)]
+    pub interactive: bool,
     /// Skip the git pre-commit hook.
     #[arg(short = 'n', long)]
     pub no_verify: bool,
+    /// Commit only these paths; the rest stays uncommitted. With no paths and no `-i`, jjk commits
+    /// the git-staged files if any are staged, otherwise the whole working copy.
+    #[arg(value_name = "PATH")]
+    pub paths: Vec<String>,
 }
 
 #[derive(Args, Debug)]

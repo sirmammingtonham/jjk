@@ -32,14 +32,14 @@ fn failing_hook_blocks_commit() {
     let (tmp, e) = setup();
     write_hook(tmp.path(), "#!/bin/sh\nexit 1\n");
     write(tmp.path(), "a.txt", "x\n");
-    assert!(e.run_pre_commit().is_err(), "a non-zero pre-commit hook blocks");
+    assert!(e.run_pre_commit(&jjk::vcs::CommitScope::All).is_err(), "a non-zero pre-commit hook blocks");
 }
 
 #[test]
 fn no_hook_is_a_noop() {
     let (tmp, e) = setup();
     write(tmp.path(), "a.txt", "x\n");
-    assert!(e.run_pre_commit().is_ok(), "no hook -> nothing to verify");
+    assert!(e.run_pre_commit(&jjk::vcs::CommitScope::All).is_ok(), "no hook -> nothing to verify");
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn non_executable_hook_is_skipped() {
     // Write but DON'T chmod +x; git (and jjk) ignore non-executable hooks.
     std::fs::create_dir_all(tmp.path().join(".git/hooks")).unwrap();
     std::fs::write(tmp.path().join(".git/hooks/pre-commit"), "#!/bin/sh\nexit 1\n").unwrap();
-    assert!(e.run_pre_commit().is_ok(), "non-executable hook is skipped");
+    assert!(e.run_pre_commit(&jjk::vcs::CommitScope::All).is_ok(), "non-executable hook is skipped");
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn passing_hook_sees_staged_changes_and_commit_proceeds() {
     e.branch_create("feat-a", true).unwrap();
     write(tmp.path(), "a.txt", "hello\n");
 
-    e.run_pre_commit().unwrap();
+    e.run_pre_commit(&jjk::vcs::CommitScope::All).unwrap();
     let staged = std::fs::read_to_string(tmp.path().join("hook-staged.txt")).unwrap();
     assert!(staged.contains("a.txt"), "hook saw staged file: {staged:?}");
 

@@ -20,8 +20,9 @@ so plain `git` keeps working alongside `jjk` as an escape hatch. It detects and 
 
 ## 2. Build a stack
 
-Create a branch, commit into it, then stack another branch on top. There is no staging area, so
-`jjk commit` commits all current changes. Save incremental progress with multiple commits.
+Create a branch, commit into it, then stack another branch on top. By default `jjk commit` commits
+all current changes — but if you've staged files with `git add` (say, from your editor), it commits
+just those. You can also scope a commit with `jjk commit <paths>` or `jjk commit -i`.
 
 ```bash
 jjk branch create feat-a

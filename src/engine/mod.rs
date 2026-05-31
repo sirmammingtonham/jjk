@@ -7,7 +7,7 @@ use crate::error::{JjkError, Result};
 use crate::forge::Forge;
 use crate::model::{ChangeId, CommitInfo, PrState};
 use crate::state::State;
-use crate::vcs::{PushOpts, Vcs};
+use crate::vcs::{CommitScope, PushOpts, Vcs};
 use stack::{Branch, Stack};
 
 use std::path::{Path, PathBuf};
@@ -325,12 +325,23 @@ impl Engine {
 
     /// Run the git `pre-commit` hook (git semantics): blocks the commit if it fails. Callers skip
     /// this when `--no-verify` is given.
-    pub fn run_pre_commit(&self) -> Result<()> {
-        self.vcs.run_pre_commit_hook()
+    pub fn run_pre_commit(&self, scope: &CommitScope) -> Result<()> {
+        self.vcs.run_pre_commit_hook(scope)
     }
 
-    /// `jjk commit -m M` — the commit algorithm (ARCH §3.3).
+    /// Root-relative paths currently staged in the colocated git index (empty if none).
+    pub fn staged_paths(&self) -> Result<Vec<String>> {
+        self.vcs.staged_paths()
+    }
+
+    /// `jjk commit -m M` — commit the whole working copy (ARCH §3.3).
     pub fn commit(&mut self, message: &str) -> Result<Report> {
+        self.commit_scoped(message, &CommitScope::All)
+    }
+
+    /// `jjk commit` with an explicit scope: all, specific paths (incl. git-staged), or interactive.
+    /// Anything outside the scope stays uncommitted in `@`.
+    pub fn commit_scoped(&mut self, message: &str, scope: &CommitScope) -> Result<Report> {
         let mut report = Report::default();
         self.ensure_fresh(&mut report)?;
         let (branch, old_tip) = self.current_branch_tip()?.ok_or(JjkError::NotOnBranch)?;
@@ -339,7 +350,7 @@ impl Engine {
         let branch_cl = branch.clone();
         let mut new_tip: Option<ChangeId> = None;
         self.vcs.transaction(&mut |tx| {
-            let c = tx.finalize_working_copy(message)?; // C = @-, fresh empty @ on top
+            let c = tx.finalize_working_copy_scoped(message, scope)?; // C = @-, fresh @ keeps the rest
             tx.set_bookmark(&branch_cl, &c)?; // advance bookmark (no-op if already there)
             for f in &upstack_firsts {
                 tx.rebase(f, &c)?; // restack upstack onto C

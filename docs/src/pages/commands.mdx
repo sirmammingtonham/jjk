@@ -17,7 +17,9 @@ description: Every jjk command at a glance.
 
 | Command | What it does |
 | --- | --- |
-| `jjk commit -m <msg>` | Commit **all** current changes (no staging area). Runs the git `pre-commit` hook (`-n`/`--no-verify` to skip). Mid-stack commits auto-restack the upstack. |
+| `jjk commit -m <msg>` | Commit changes. If files are **staged in git** (e.g. from your editor), commits just those; otherwise commits the whole working copy. Runs the git `pre-commit` hook (`-n`/`--no-verify` to skip). Mid-stack commits auto-restack the upstack. |
+| `jjk commit -m <msg> <paths...>` | Commit only the given paths; the rest stays uncommitted. |
+| `jjk commit -i -m <msg>` | Interactively pick hunks/files to commit (diff editor); the rest stays uncommitted. |
 | `jjk commit --amend [-m <msg>]` | Amend the current branch's tip; descendants auto-rebase. |
 | `jjk commit --fixup <branch>` | Fold the working-copy changes into `<branch>`'s tip (an older commit downstack); descendants auto-rebase. |
 | `jjk commit --split` | Split the branch tip into two commits (interactive diff editor). |
@@ -28,7 +30,7 @@ description: Every jjk command at a glance.
 | `jjk ls` | Stack diagram (branches only). |
 | `jjk ll` | Stack diagram with each branch's commits. |
 | `jjk stash` / `jjk stash pop` | Park / restore working-copy changes (mostly unnecessary, since switching is safe in jj). |
-| `jjk add` | Friendly reminder that there's no staging area. |
+| `jjk add` | Friendly reminder that jjk has no staging area of its own but honors git's (`git add` then `jjk commit`). |
 
 ## Stack management
 

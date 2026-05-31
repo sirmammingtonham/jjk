@@ -16,6 +16,19 @@ pub struct PushOpts {
     pub delete: bool,
 }
 
+/// Which subset of the working copy a `commit` should finalize. The remainder stays uncommitted in
+/// `@`. Paths are **repo-root-relative** (the engine resolves CLI paths against the root).
+#[derive(Clone, Debug, Default)]
+pub enum CommitScope {
+    /// Everything in the working copy (the default with no staging).
+    #[default]
+    All,
+    /// Only these root-relative paths — used for explicit CLI paths and git-staged files.
+    Paths(Vec<String>),
+    /// Interactively pick hunks/files (`jj commit -i`; inherits the terminal).
+    Interactive,
+}
+
 /// The VCS port. Read methods are direct; mutations are grouped inside [`Vcs::transaction`] so a
 /// backend may make them atomic. The binary adapter runs each mutation as one `jj` invocation and
 /// reports `atomic_transactions: false`.
@@ -52,6 +65,11 @@ pub trait Vcs {
 
     /// Human-readable diff for a revset (e.g. `base..tip`). Non-snapshotting.
     fn diff(&self, revset: &str) -> Result<String>;
+
+    /// Repo-root-relative paths currently staged in the colocated git index
+    /// (`git diff --cached --name-only`). Empty when nothing is staged. jj ignores the index, so
+    /// this is purely a signal of what the user staged (e.g. via their editor).
+    fn staged_paths(&self) -> Result<Vec<String>>;
 
     // ---- mutations (grouped) ----
 
@@ -90,10 +108,11 @@ pub trait Vcs {
     /// Push all pending bookmark deletions to the remote (`jj git push --deleted`).
     fn push_deleted(&self, remote: &str) -> Result<()>;
     /// Run the git `pre-commit` hook (respecting `core.hooksPath`) the way `git commit` would:
-    /// stage the working changes so index-based hooks see them, then run the hook with the
-    /// terminal. Returns `Err` if the hook exits non-zero; `Ok` if it passes or there is no
-    /// executable hook.
-    fn run_pre_commit_hook(&self) -> Result<()>;
+    /// stage the in-scope changes so index-based hooks see them, then run the hook with the
+    /// terminal. `All`/`Interactive` stage everything (`git add -A`); `Paths` stages just those
+    /// paths so the hook sees exactly what will be committed. Returns `Err` if the hook exits
+    /// non-zero; `Ok` if it passes or there is no executable hook.
+    fn run_pre_commit_hook(&self, scope: &CommitScope) -> Result<()>;
 
     fn add_remote(&self, name: &str, url: &str) -> Result<()>;
     /// Names of configured remotes (excludes the colocated `git` pseudo-remote).
@@ -110,6 +129,14 @@ pub trait VcsTx {
     /// `jj commit -m <message>`: finalize `@` into a real commit and open a fresh empty `@`.
     /// Returns the finalized commit's change id (the just-created `@-`).
     fn finalize_working_copy(&mut self, message: &str) -> Result<ChangeId>;
+
+    /// Like [`finalize_working_copy`](VcsTx::finalize_working_copy) but only finalizes the part of
+    /// `@` named by `scope`; anything outside the scope stays uncommitted in the new `@`.
+    fn finalize_working_copy_scoped(
+        &mut self,
+        message: &str,
+        scope: &CommitScope,
+    ) -> Result<ChangeId>;
 
     /// `jj describe <rev> -m <message>`.
     fn describe(&mut self, rev: &ChangeId, message: &str) -> Result<()>;
