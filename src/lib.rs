@@ -18,4 +18,5 @@ pub mod model;
 pub mod prompt;
 pub mod render;
 pub mod state;
+pub mod text;
 pub mod vcs;

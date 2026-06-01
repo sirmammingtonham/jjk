@@ -160,9 +160,10 @@ pub fn print_report(report: &Report) {
     // summary is rendered here, at the end.
     if !report.conflicts.is_empty() {
         eprintln!();
+        let n = report.conflicts.len();
         eprintln!(
-            "CONFLICT: {} change(s) need resolution:",
-            report.conflicts.len()
+            "CONFLICT: {n} {} resolution:",
+            crate::text::plural(n, "change needs", "changes need")
         );
         for c in &report.conflicts {
             eprintln!("  {c}");

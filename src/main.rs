@@ -167,7 +167,11 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
                     .ok_or_else(|| anyhow::anyhow!("commit requires -m <message>"))?;
                 if let CommitScope::Paths(p) = &scope {
                     if args.paths.is_empty() {
-                        eprintln!("committing {} staged file(s)", p.len());
+                        eprintln!(
+                            "committing {} staged {}",
+                            p.len(),
+                            jjk::text::plural(p.len(), "file", "files")
+                        );
                     }
                 }
                 engine.commit_scoped(&msg, &scope)?

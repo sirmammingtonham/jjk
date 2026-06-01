@@ -8,6 +8,7 @@ use crate::forge::Forge;
 use crate::model::{ChangeId, CommitInfo, PrRef, PrState};
 use crate::prompt::{AutoFill, PrDraft, Prompter};
 use crate::state::State;
+use crate::text::plural;
 use crate::vcs::{CommitScope, PushOpts, Vcs};
 use stack::{Branch, Stack};
 
@@ -429,7 +430,8 @@ impl Engine {
             self.state.save(&self.root)?;
         }
         if !upstack_firsts.is_empty() {
-            report.note(format!("restacked {} upstack branch(es)", upstack_firsts.len()));
+            let n = upstack_firsts.len();
+            report.note(format!("restacked {n} upstack {}", plural(n, "branch", "branches")));
         }
         report.note(format!("committed to {branch}"));
         self.collect_conflicts(&mut report)?;
@@ -571,7 +573,8 @@ impl Engine {
                 }
                 Ok(())
             })?;
-            report.note(format!("restacked {} branch(es)", actions.len()));
+            let n = actions.len();
+            report.note(format!("restacked {n} {}", plural(n, "branch", "branches")));
         }
         self.collect_conflicts(&mut report)?;
         Ok(report)
@@ -1128,10 +1131,11 @@ impl Engine {
         let stack = self.derive_stack()?;
         for b in &stack.branches {
             if b.has_conflict() {
+                let n = b.commits.iter().filter(|c| c.has_conflict).count();
                 report.conflicts.push(format!(
-                    "{}: {} change(s) need resolution",
+                    "{}: {n} {} resolution",
                     b.name,
-                    b.commits.iter().filter(|c| c.has_conflict).count()
+                    plural(n, "change needs", "changes need")
                 ));
             }
         }
@@ -1171,7 +1175,10 @@ impl Engine {
         self.ensure_fresh(&mut report)?;
         let moved = self.rebase_stack_onto_trunk()?;
         if moved > 0 {
-            report.note(format!("rebased {moved} stack root(s) onto trunk"));
+            report.note(format!(
+                "rebased {moved} stack {} onto trunk",
+                plural(moved, "root", "roots")
+            ));
         } else {
             report.note("stack already on latest trunk");
         }
@@ -1485,7 +1492,10 @@ impl Engine {
         // ancestry (immutable) and are left untouched.
         let moved = self.rebase_stack_onto_trunk()?;
         if moved > 0 {
-            report.note(format!("rebased {moved} stack root(s) onto trunk"));
+            report.note(format!(
+                "rebased {moved} stack {} onto trunk",
+                plural(moved, "root", "roots")
+            ));
         }
 
         // 4. Reconcile each merged branch.
@@ -1577,7 +1587,10 @@ impl Engine {
                 prev_tracked = Some(b.name.clone());
             }
             if pushed > 0 {
-                report.note(format!("force-pushed {pushed} surviving branch(es)"));
+                report.note(format!(
+                    "force-pushed {pushed} surviving {}",
+                    plural(pushed, "branch", "branches")
+                ));
             }
             // Best-effort: propagate merged-branch deletions to the remote.
             if !merged_names.is_empty() {
