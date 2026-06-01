@@ -1295,6 +1295,8 @@ impl Engine {
             base: String,
             title: String,
             body: String,
+            /// Whether the remote already has this branch at its tip (push would be a no-op).
+            on_remote: bool,
         }
         let tracked: Vec<&Branch> = stack.branches.iter().filter(|b| b.tracked).collect();
         let mut plan: Vec<Item> = Vec::new();
@@ -1312,6 +1314,7 @@ impl Engine {
                 base: base.clone(),
                 title,
                 body: pr_body(b, &base),
+                on_remote: tip_on_remote(b, &remote),
             });
             prev_tracked = Some(b.name.clone());
         }
@@ -1351,15 +1354,23 @@ impl Engine {
         // is written correct the first time (no placeholder/renumber step).
         for (slot, &i) in to_submit.iter().enumerate() {
             let item = &plan[i];
-            self.vcs.push(&remote, &item.name, PushOpts::default())?;
+            // Only push when the branch actually moved — don't re-push an unchanged branch.
+            if !item.on_remote {
+                self.vcs.push(&remote, &item.name, PushOpts::default())?;
+            }
             let number = match &existing[slot] {
                 Some(pr) => {
-                    let pr = pr.number;
-                    // Retarget the base only — never the body, so we don't clobber the author's
-                    // description on a re-submit.
-                    self.forge()?.update_pr(pr, Some(&item.base)).await?;
-                    report.note(format!("updated #{} {} (base {})", pr, item.name, item.base));
-                    pr
+                    let pr_num = pr.number;
+                    // Retarget the base only when it actually changed — never the body, so we don't
+                    // clobber the author's description, and we skip a no-op API call on re-submit.
+                    if pr.base != item.base {
+                        self.forge()?.update_pr(pr_num, Some(&item.base)).await?;
+                        report.note(format!(
+                            "updated #{pr_num} {} (base {})",
+                            item.name, item.base
+                        ));
+                    }
+                    pr_num
                 }
                 None => {
                     let defaults = PrDraft {
@@ -1604,7 +1615,6 @@ impl Engine {
             };
 
             let mut prev_tracked: Option<String> = None;
-            let mut pushed = 0usize;
             for b in survivors.branches.iter().filter(|b| b.tracked) {
                 // A conflicted commit cannot be pushed; skip and report (D4 — don't abort).
                 if b.has_conflict() {
@@ -1615,31 +1625,31 @@ impl Engine {
                     prev_tracked = Some(b.name.clone());
                     continue;
                 }
-                self.vcs.push(&remote, &b.name, PushOpts::default())?;
-                pushed += 1;
+                // Only push when the branch actually moved — re-pushing an unchanged branch on
+                // every sync is wasteful (and a no-op force-push). After a rebase the tip is a new
+                // commit, so this pushes; an untouched branch is skipped.
+                if !tip_on_remote(b, &remote) {
+                    self.vcs.push(&remote, &b.name, PushOpts::default())?;
+                    report.note(format!("pushed {}", b.name));
+                }
+                let base = prev_tracked.clone().unwrap_or_else(|| trunk_name.clone());
                 if let Some(pr) = b.pr {
-                    let base = prev_tracked.clone().unwrap_or_else(|| trunk_name.clone());
-                    // Retarget best-effort: a dependent PR may have been closed by GitHub when its
-                    // base branch was deleted on merge — you can't retarget a closed PR, so report.
+                    // Retarget only when the base actually changed (best-effort: a dependent PR may
+                    // have been closed by GitHub when its base branch was deleted on merge — you
+                    // can't retarget a closed PR, so report).
                     match pr_by_head.get(&b.name).cloned().flatten() {
-                        Some(p) if p.state == PrState::Open => {
+                        Some(p) if p.state == PrState::Open && p.base != base => {
                             self.forge()?.update_pr(pr, Some(&base)).await?;
                             report.note(format!("#{pr} {} → base {base}", b.name));
                         }
-                        Some(p) => report.note(format!(
+                        Some(p) if p.state != PrState::Open => report.note(format!(
                             "#{pr} {} is {}; not retargeting (reopen it to restack the PR)",
                             b.name, p.state
                         )),
-                        None => report.note(format!("{}: PR not found; skipping retarget", b.name)),
+                        _ => {} // base already correct, or PR not found — nothing to do
                     }
                 }
                 prev_tracked = Some(b.name.clone());
-            }
-            if pushed > 0 {
-                report.note(format!(
-                    "force-pushed {pushed} surviving {}",
-                    plural(pushed, "branch", "branches")
-                ));
             }
             // Best-effort: propagate merged-branch deletions to the remote.
             if !merged_names.is_empty() {
@@ -1663,6 +1673,18 @@ impl Engine {
         self.collect_conflicts(&mut report)?;
         Ok(report)
     }
+}
+
+/// Whether the remote already has `branch` at its current tip commit — i.e. a push would be a
+/// no-op. Read from the tip commit's remote bookmarks in the derived stack, so it needs no extra
+/// query: after a rewrite (rebase/amend) the tip is a new commit that no longer carries
+/// `branch@remote`, so this returns false and the branch gets pushed.
+fn tip_on_remote(branch: &Branch, remote: &str) -> bool {
+    branch.commits.last().is_some_and(|c| {
+        c.remote_bookmarks
+            .iter()
+            .any(|r| r.name == branch.name && r.remote == remote)
+    })
 }
 
 /// PR body: a small jjk-managed marker plus the branch's commit subjects and its base.

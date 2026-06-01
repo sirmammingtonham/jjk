@@ -101,6 +101,37 @@ async fn sync_no_push_rebases_stack_onto_advanced_trunk() {
 }
 
 #[tokio::test]
+async fn sync_does_not_repush_unchanged_branches() {
+    let mut h = setup_with_remote();
+    let fake = Arc::new(FakeForge::new());
+    seeded_stack(&mut h, &fake).await;
+
+    // Nothing changed since submit (trunk hasn't moved): sync must not re-push any branch.
+    let report = h.engine.sync(true).await.unwrap();
+    assert!(
+        !report.notes.iter().any(|n| n.starts_with("pushed ")),
+        "sync should not re-push unchanged branches; notes: {:?}",
+        report.notes
+    );
+}
+
+#[tokio::test]
+async fn resubmit_does_not_repush_unchanged_branches() {
+    let mut h = setup_with_remote();
+    let fake = Arc::new(FakeForge::new());
+    seeded_stack(&mut h, &fake).await; // already submitted once
+
+    // Re-submit with nothing changed: no PRs created/updated (bases unchanged), no pushes needed.
+    let report = h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
+    assert!(
+        !report.notes.iter().any(|n| n.starts_with("created ") || n.starts_with("updated ")),
+        "re-submit of an unchanged stack should be a no-op on the forge; notes: {:?}",
+        report.notes
+    );
+    assert_eq!(fake.count(), 2, "no duplicate PRs");
+}
+
+#[tokio::test]
 async fn sync_push_rebases_then_pushes_onto_advanced_trunk() {
     let mut h = setup_with_remote();
     let fake = Arc::new(FakeForge::new());
