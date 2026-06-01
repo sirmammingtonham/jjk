@@ -58,6 +58,7 @@ description: Every jjk command at a glance.
 | `jjk fetch` | Fetch from the remote. |
 | `jjk pull` | Fetch trunk and rebase the current stack onto it (no merged-PR detection, no push). |
 | `jjk push` | Push the current branch (force-with-lease). |
+| `jjk pr view` | Open the current branch's PR in the browser. `--print`/`-p` prints the URL instead (for scripts / headless use). |
 | `jjk submit` | Push the whole stack and create/update a PR per branch, each based on the one below it. For each **new** branch it prompts for the PR title, body, and draft status (title defaults to the commit subject; press `e` at the body prompt to edit in `$EDITOR`). Branches that already have a PR are updated without prompting. Idempotent; updates the stack-navigation comment. |
 | `jjk branch submit` | Submit just the current branch's PR. |
 | `jjk upstack submit` / `jjk downstack submit` | Submit only the current branch and everything above / below it. Bases still point at each branch's real downstack branch. |
