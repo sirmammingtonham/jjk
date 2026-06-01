@@ -1334,28 +1334,55 @@ impl Engine {
             .iter()
             .filter_map(|i| self.state.pr_of(&i.name).map(|pr| (i.name.clone(), pr)))
             .collect();
-        if stack_prs.len() >= 2 {
-            // Upsert each PR's nav comment concurrently — they target different PRs, so they're
-            // independent. Each task still does find→update/create in order for its own PR, keeping
-            // the upsert idempotent (one comment per PR, no duplicates on re-submit).
-            let forge = self.forge()?;
-            let tasks = stack_prs.iter().enumerate().map(|(idx, (_, pr))| {
-                let pr = *pr;
-                let body = nav_comment_body(&stack_prs, idx, yuji);
-                async move {
-                    match forge.find_comment(pr, NAV_MARKER).await? {
-                        Some(cid) => forge.update_comment(cid, &body).await?,
-                        None => {
-                            forge.create_comment(pr, &body).await?;
-                        }
-                    }
-                    Ok::<(), anyhow::Error>(())
-                }
-            });
-            futures::future::try_join_all(tasks).await?;
-            report.note(format!("updated stack navigation on {} PRs", stack_prs.len()));
+        let n = self
+            .upsert_nav_comments(&stack_prs, yuji, &std::collections::HashMap::new())
+            .await?
+            .len();
+        if n > 0 {
+            report.note(format!("updated stack navigation on {n} PRs"));
         }
         Ok(report)
+    }
+
+    /// Upsert the stack-navigation comment on each PR in `prs` (bottom→top order). Runs across PRs
+    /// concurrently (they target different PRs), while each PR's find→update/create stays ordered,
+    /// so it's idempotent — one comment per PR, never duplicated. `known` supplies comment ids
+    /// already known this run (e.g. from a just-created comment) to skip the `find_comment` lookup.
+    /// Returns `(pr, comment_id)` for every PR touched so callers can cache them. No-op (`[]`) for
+    /// fewer than 2 PRs — a lone PR has no stack to navigate. Used by both `submit` and `sync`, so
+    /// sync also refreshes the comments (and picks up the opt-in flourish when newly configured).
+    async fn upsert_nav_comments(
+        &self,
+        prs: &[(String, u64)],
+        yuji: bool,
+        known: &std::collections::HashMap<u64, u64>,
+    ) -> Result<Vec<(u64, u64)>> {
+        if prs.len() < 2 {
+            return Ok(Vec::new());
+        }
+        let forge = self.forge()?;
+        let tasks = prs.iter().enumerate().map(|(idx, (_, pr))| {
+            let pr = *pr;
+            let body = nav_comment_body(prs, idx, yuji);
+            let known_id = known.get(&pr).copied();
+            async move {
+                let id = match known_id {
+                    Some(id) => {
+                        forge.update_comment(id, &body).await?;
+                        id
+                    }
+                    None => match forge.find_comment(pr, NAV_MARKER).await? {
+                        Some(id) => {
+                            forge.update_comment(id, &body).await?;
+                            id
+                        }
+                        None => forge.create_comment(pr, &body).await?,
+                    },
+                };
+                Ok::<(u64, u64), anyhow::Error>((pr, id))
+            }
+        });
+        futures::future::try_join_all(tasks).await
     }
 }
 
@@ -1527,6 +1554,24 @@ impl Engine {
             // Best-effort: propagate merged-branch deletions to the remote.
             if !merged_names.is_empty() {
                 let _ = self.vcs.push_deleted(&remote);
+            }
+
+            // Refresh the stack-navigation comments for the (now reconciled) surviving stack. sync
+            // changes the stack — merged branches drop out, bases move — so the comments would
+            // otherwise go stale; this also surfaces the opt-in flourish when newly configured.
+            let stack_prs: Vec<(String, u64)> = survivors
+                .branches
+                .iter()
+                .filter(|b| b.tracked)
+                .filter_map(|b| b.pr.map(|pr| (b.name.clone(), pr)))
+                .collect();
+            let yuji = self.vcs.config_get(YUJI_KEY)?.as_deref() == Some(YUJI_VALUE);
+            let n = self
+                .upsert_nav_comments(&stack_prs, yuji, &std::collections::HashMap::new())
+                .await?
+                .len();
+            if n > 0 {
+                report.note(format!("updated stack navigation on {n} PRs"));
             }
         }
 
