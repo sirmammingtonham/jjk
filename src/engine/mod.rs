@@ -1189,6 +1189,40 @@ impl Engine {
     /// Rebase the roots of the current stack (`roots(trunk()..top)`) onto trunk. Landing-method
     /// agnostic: only commits not already in trunk's ancestry move (JJ_NOTES §9c). Returns the
     /// number of roots rebased.
+    /// Fast-forward the local trunk bookmark to the fetched remote trunk (`trunk@remote`), so the
+    /// rest of `sync` (which anchors on the local bookmark) rebases the stack onto the latest trunk.
+    /// No-op when there's no local trunk bookmark (the `trunk()` fallback already follows the
+    /// remote), when it's already current, or when the move wouldn't be a fast-forward (so a
+    /// divergent local trunk is never clobbered).
+    fn advance_trunk_to_remote(&self, report: &mut Report) -> Result<()> {
+        let trunk = self.state.config.trunk.clone();
+        let remote = self.state.config.remote.clone();
+        let Some(local_id) = self.resolve_bookmark(&trunk)? else {
+            return Ok(());
+        };
+        let remote_ref = format!("{trunk}@{remote}");
+        let Some(remote_tip) = self.vcs.resolve(&remote_ref)?.into_iter().next() else {
+            return Ok(()); // remote trunk not fetched (e.g. brand-new repo)
+        };
+        if remote_tip.change_id == local_id {
+            return Ok(());
+        }
+        // Only advance if the local trunk is an ancestor of the fetched remote trunk.
+        let is_fast_forward = self
+            .vcs
+            .resolve(&format!("{} & ancestors({remote_ref})", local_id.as_str()))?
+            .iter()
+            .any(|c| c.change_id == local_id);
+        if !is_fast_forward {
+            return Ok(());
+        }
+        let target = remote_tip.change_id;
+        let name = trunk.clone();
+        self.vcs.transaction(&mut |tx| tx.set_bookmark(&name, &target))?;
+        report.note(format!("updated trunk '{trunk}' to {remote}"));
+        Ok(())
+    }
+
     fn rebase_stack_onto_trunk(&self) -> Result<usize> {
         let (trunk_revset, trunk_id) = self.trunk_anchor()?;
         let stack = self.derive_stack()?;
@@ -1476,9 +1510,13 @@ impl Engine {
             .filter_map(|b| b.pr.map(|pr| (b.name.clone(), pr)))
             .collect();
 
-        // 2. fetch (advances local trunk; JJ_NOTES §9), then query merged-state.
+        // 2. fetch, then bring the local trunk bookmark up to the fetched remote position. jj only
+        // auto-advances *tracked* local bookmarks on fetch, so without this a non-tracking trunk
+        // would stay behind and the stack wouldn't rebase onto the new trunk (it only moves the
+        // remote-tracking `trunk@remote`). Then query merged-state.
         self.vcs.fetch(&self.state.config.remote)?;
         report.note(format!("fetched {}", self.state.config.remote));
+        self.advance_trunk_to_remote(&mut report)?;
         // Query merged-state for all candidate PRs concurrently (independent reads by PR number) —
         // one round-trip instead of N. Order is preserved by zipping back onto `candidates`.
         let merged_flags = {
