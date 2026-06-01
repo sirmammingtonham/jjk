@@ -271,6 +271,42 @@ impl Vcs for JjCli {
             .collect())
     }
 
+    fn git_head(&self) -> Result<Option<String>> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["rev-parse", "--verify", "-q", "HEAD"])
+            .output()
+            .context("failed to spawn `git`")?;
+        if !out.status.success() {
+            return Ok(None); // unborn HEAD / not colocated
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok((!s.is_empty()).then_some(s))
+    }
+
+    fn set_git_head_branch(&self, branch: &str) -> Result<()> {
+        let refname = format!("refs/heads/{branch}");
+        // Only attach if jj has exported the bookmark to a git ref; otherwise leave HEAD as-is.
+        let exists = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["show-ref", "--verify", "--quiet", &refname])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !exists {
+            return Ok(());
+        }
+        Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["symbolic-ref", "HEAD", &refname])
+            .output()
+            .context("failed to spawn `git`")?;
+        Ok(())
+    }
+
     fn resolve(&self, revset: &str) -> Result<Vec<CommitInfo>> {
         self.log(revset)
     }
@@ -413,7 +449,30 @@ impl Vcs for JjCli {
     fn push(&self, remote: &str, bookmark: &str, _opts: PushOpts) -> Result<()> {
         // jj push is force-with-lease by default; `-b <name>` also creates/deletes by name
         // (no `--allow-new` needed — deprecated). (JJ_NOTES §10)
-        self.run_with_stderr(&["git", "push", "--remote", remote, "-b", bookmark])?;
+        let args = ["git", "push", "--remote", remote, "-b", bookmark];
+        if let Err(e) = self.run_with_stderr(&args) {
+            let msg = e.to_string();
+            if msg.contains("Non-tracking remote bookmark") {
+                // A remote bookmark from an earlier push exists but the local bookmark doesn't track
+                // it (e.g. the branch was pushed / opened as a PR before being tracked in jjk). jj
+                // refuses to push by name in that case. Adopt the remote bookmark, then retry — the
+                // push then updates the existing remote/PR rather than erroring.
+                self.run_with_stderr(&["bookmark", "track", bookmark, "--remote", remote])?;
+                self.run_with_stderr(&args)?;
+            } else if msg.contains("is conflicted") {
+                // Local and remote diverged into a conflicted bookmark (e.g. the local stack was
+                // rebased after the branch was already pushed). jjk's local stack is the source of
+                // truth, so resolve the bookmark to its local (git) position and force-push it.
+                let local = format!("{bookmark}@git");
+                self.run_with_stderr(&["bookmark", "set", bookmark, "-r", &local, "-B"])?;
+                eprintln!(
+                    "note: resolved conflicted bookmark '{bookmark}' to the local position before pushing"
+                );
+                self.run_with_stderr(&args)?;
+            } else {
+                return Err(e);
+            }
+        }
         Ok(())
     }
 

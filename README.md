@@ -2,13 +2,13 @@
 
 **Stacked GitHub PRs with the git commands you already know, minus the restack pain.**
 
-![](https://i.imgflip.com/at3gj0.jpg)
-
 `jjk` is a CLI that gives you a familiar **git** command surface and a stacking workflow (inspired by
 [git-spice](https://abhinav.github.io/git-spice/)) while using
 **[Jujutsu (jj)](https://jj-vcs.github.io/jj/)** as the engine underneath. You keep the git mental
 model. jj does the hard parts: automatic rebasing, first-class conflicts, stable change identity, and
 instant undo.
+
+![](https://i.imgflip.com/at3gj0.jpg)
 
 📖 **[Documentation](https://ethan.website/jjk/)**
 

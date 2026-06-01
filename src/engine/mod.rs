@@ -305,6 +305,55 @@ impl Engine {
         })
     }
 
+    // ---------------------------------------------------------------- git interop
+
+    /// Follow an external `git checkout`. jjk's fast reads use `--ignore-working-copy`, which skips
+    /// jj's import of git `HEAD` — so after a plain `git checkout` jjk's position would lag. When
+    /// git `HEAD` no longer matches jj's `@-`, snapshot once to let jj reconcile (it resets `@`
+    /// onto the new `HEAD`). Returns `true` if it had to reconcile. Cheap in the common case (two
+    /// non-snapshotting queries, no snapshot). Staleness (multi-workspace only) is handled
+    /// separately; with one workspace a snapshot can't be stale-blocked.
+    pub fn reconcile_git_head(&self) -> Result<bool> {
+        let Some(head) = self.vcs.git_head()? else {
+            return Ok(false);
+        };
+        let base = self.vcs.resolve("@-")?.into_iter().next().map(|c| c.commit_id.0);
+        if base.as_deref() == Some(head.as_str()) {
+            return Ok(false); // jj already in sync with git HEAD (the normal case)
+        }
+        if self.vcs.workspace_count()? <= 1 {
+            self.vcs.snapshot()?; // triggers jj's "reset working copy parent to git HEAD"
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Attach git `HEAD` to the branch jjk is currently on, so plain `git` shows the same branch.
+    /// jj detaches `HEAD` whenever it moves `@`, so this runs after each command to keep them in
+    /// sync. Best-effort.
+    ///
+    /// Only attaches when the branch tip is exactly `@-`, preserving jj's invariant that git `HEAD`
+    /// == `@-` (so the next [`reconcile_git_head`](Self::reconcile_git_head) is a no-op). In the
+    /// normal "checked out" state the current branch sits at `@-`. Right after `branch create` the
+    /// bookmark rides the empty `@` (tip == `@`, not `@-`); attaching there would point `HEAD` at
+    /// `@` and trigger a spurious reconcile, so we leave it until the first commit moves the
+    /// bookmark down to `@-`.
+    pub fn sync_git_head_to_current(&self) -> Result<()> {
+        let Some((branch, tip)) = self.current_branch_tip()? else {
+            return Ok(());
+        };
+        let at_parent = self
+            .vcs
+            .resolve("@-")?
+            .into_iter()
+            .next()
+            .is_some_and(|p| p.change_id == tip);
+        if at_parent {
+            self.vcs.set_git_head_branch(&branch)?;
+        }
+        Ok(())
+    }
+
     // ---------------------------------------------------------------- staleness guard
 
     /// Auto-recover a stale working copy before any command that reads `@` (ARCH §8/§12).

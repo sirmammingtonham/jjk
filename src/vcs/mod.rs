@@ -71,6 +71,16 @@ pub trait Vcs {
     /// this is purely a signal of what the user staged (e.g. via their editor).
     fn staged_paths(&self) -> Result<Vec<String>>;
 
+    /// The commit the colocated git `HEAD` points at (`git rev-parse HEAD`), or `None` if there is
+    /// no git HEAD (unborn / not colocated). Used to detect an external `git checkout`.
+    fn git_head(&self) -> Result<Option<String>>;
+
+    /// Attach the colocated git `HEAD` symbolically to `branch` (`git symbolic-ref`), so plain git
+    /// shows the same branch jjk is on. jj leaves `HEAD` detached when it moves `@`; this re-points
+    /// it. No-op if `refs/heads/<branch>` doesn't exist. Only rewrites the ref — never touches the
+    /// working tree or index.
+    fn set_git_head_branch(&self, branch: &str) -> Result<()>;
+
     // ---- mutations (grouped) ----
 
     /// Run a sequence of mutations. The binary adapter executes them sequentially (best effort,

@@ -13,6 +13,9 @@ description: How a stack is built, submitted, reviewed, merged, and synced with 
   finalizes your edits into a real commit and advances the branch.
 - The stack graph is **derived from jj at runtime**, so there's nothing to keep in sync and nothing
   to corrupt. The only thing `jjk` stores is the branch to PR-number mapping.
+- You can keep using plain git where it's handy. A `git checkout <branch>` is followed by jjk (it
+  reconciles position to git's `HEAD`), and `git add` drives what `jjk commit` commits — jj still
+  handles the rebasing and conflict resolution underneath.
 
 ## 1. Build the stack
 
