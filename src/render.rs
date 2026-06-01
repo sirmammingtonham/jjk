@@ -156,9 +156,8 @@ pub fn render_worktrees(rows: &[WorktreeRow]) -> String {
 
 /// Print a [`Report`]'s notes and conflict summary to stdout/stderr.
 pub fn print_report(report: &Report) {
-    for n in &report.notes {
-        println!("{n}");
-    }
+    // Notes were already streamed as they were produced (see `Report::note`); only the conflict
+    // summary is rendered here, at the end.
     if !report.conflicts.is_empty() {
         eprintln!();
         eprintln!(

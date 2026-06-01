@@ -36,7 +36,12 @@ pub struct Report {
 
 impl Report {
     pub fn note(&mut self, s: impl Into<String>) {
-        self.notes.push(s.into());
+        let s = s.into();
+        // Stream each note as it happens (stdout is line-buffered, so it flushes per line) rather
+        // than buffering until the command ends — long commands like sync/submit then show
+        // per-branch progress instead of dumping everything at once. Still recorded for inspection.
+        println!("{s}");
+        self.notes.push(s);
     }
 }
 
@@ -1336,10 +1341,7 @@ impl Engine {
             .iter()
             .filter_map(|it| self.state.pr_of(&it.name).map(|pr| (it.name.clone(), pr)))
             .collect();
-        let n = self.refresh_nav_comments(&stack_prs, yuji).await?;
-        if n > 0 {
-            report.note(format!("updated stack navigation on {n} PRs"));
-        }
+        self.refresh_nav_comments(&stack_prs, yuji).await?;
         Ok(report)
     }
 
@@ -1592,10 +1594,7 @@ impl Engine {
                 .filter_map(|b| b.pr.map(|pr| (b.name.clone(), pr)))
                 .collect();
             let yuji = self.vcs.config_get(YUJI_KEY)?.as_deref() == Some(YUJI_VALUE);
-            let n = self.refresh_nav_comments(&stack_prs, yuji).await?;
-            if n > 0 {
-                report.note(format!("updated stack navigation on {n} PRs"));
-            }
+            self.refresh_nav_comments(&stack_prs, yuji).await?;
         }
 
         self.state.save(&self.root)?;
@@ -1621,7 +1620,7 @@ fn pr_body(branch: &Branch, base: &str) -> String {
 /// itself. Set `yuji = "it_doesnt_matter"` in jj config to enable.
 const YUJI_KEY: &str = "yuji";
 const YUJI_VALUE: &str = "it_doesnt_matter";
-const YUJI_FLOURISH: &str = "\n![](https://media.tenor.com/Ax5XJTSDE6kAAAAe/yuji-itadori-son.png)";
+const YUJI_FLOURISH: &str = "\n<a href=\"https://ethan.website/jjk\"/><img src=\"https://media.tenor.com/Ax5XJTSDE6kAAAAe/yuji-itadori-son.png\" width=200/></a>";
 
 #[derive(Clone, Copy, Debug)]
 pub enum NavDir {
