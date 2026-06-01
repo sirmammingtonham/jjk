@@ -42,6 +42,10 @@ pub struct BranchEntry {
     /// PR number on the forge, once submitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<u64>,
+    /// Forge id of this branch's stack-navigation comment, once posted. Cached so a later
+    /// submit/sync edits it in place instead of paginating the PR's comments to rediscover it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nav_comment_id: Option<u64>,
     /// Whether this branch is stack-tracked (created via `branch create`/`track`).
     #[serde(default)]
     pub tracked: bool,
@@ -107,5 +111,10 @@ impl State {
 
     pub fn pr_of(&self, name: &str) -> Option<u64> {
         self.branches.get(name).and_then(|b| b.pr)
+    }
+
+    /// Cached forge id of a branch's stack-navigation comment, if known.
+    pub fn nav_comment_of(&self, name: &str) -> Option<u64> {
+        self.branches.get(name).and_then(|b| b.nav_comment_id)
     }
 }

@@ -1336,23 +1336,46 @@ impl Engine {
             .iter()
             .filter_map(|it| self.state.pr_of(&it.name).map(|pr| (it.name.clone(), pr)))
             .collect();
-        let n = self
-            .upsert_nav_comments(&stack_prs, yuji, &std::collections::HashMap::new())
-            .await?
-            .len();
+        let n = self.refresh_nav_comments(&stack_prs, yuji).await?;
         if n > 0 {
             report.note(format!("updated stack navigation on {n} PRs"));
         }
         Ok(report)
     }
 
+    /// Refresh the stack-navigation comment for every PR in `stack_prs` (`(branch, pr)`, bottom→top)
+    /// and persist each comment's forge id in state. Seeding from the cached ids lets later runs
+    /// edit comments in place — skipping the `find_comment` lookup (which paginates all of a PR's
+    /// comments), like git-spice. Saves state and returns the number of comments touched.
+    async fn refresh_nav_comments(&mut self, stack_prs: &[(String, u64)], yuji: bool) -> Result<usize> {
+        // Seed the per-PR comment ids we already know (pr → comment id) from state.
+        let known: std::collections::HashMap<u64, u64> = stack_prs
+            .iter()
+            .filter_map(|(name, pr)| self.state.nav_comment_of(name).map(|cid| (*pr, cid)))
+            .collect();
+        let touched = self.upsert_nav_comments(stack_prs, yuji, &known).await?;
+        if touched.is_empty() {
+            return Ok(0);
+        }
+        // Persist the (possibly newly created) comment ids back to state, keyed by branch.
+        let name_of: std::collections::HashMap<u64, &str> =
+            stack_prs.iter().map(|(n, pr)| (*pr, n.as_str())).collect();
+        for (pr, cid) in &touched {
+            if let Some(name) = name_of.get(pr) {
+                self.state.branch_mut(name).nav_comment_id = Some(*cid);
+            }
+        }
+        self.state.save(&self.root)?;
+        Ok(touched.len())
+    }
+
     /// Upsert the stack-navigation comment on each PR in `prs` (bottom→top order). Runs across PRs
-    /// concurrently (they target different PRs), while each PR's find→update/create stays ordered,
+    /// concurrently (they target different PRs), while each PR's update/find/create stays ordered,
     /// so it's idempotent — one comment per PR, never duplicated. `known` supplies comment ids
-    /// already known this run (e.g. from a just-created comment) to skip the `find_comment` lookup.
-    /// Returns `(pr, comment_id)` for every PR touched so callers can cache them. No-op (`[]`) for
-    /// fewer than 2 PRs — a lone PR has no stack to navigate. Used by both `submit` and `sync`, so
-    /// sync also refreshes the comments (and picks up the opt-in flourish when newly configured).
+    /// already known (cached in state) to skip the `find_comment` lookup; if that cached id is stale
+    /// (comment deleted), it self-heals by rediscovering or recreating the comment — like git-spice.
+    /// Returns `(pr, comment_id)` for every PR touched so callers can persist them. No-op (`[]`) for
+    /// fewer than 2 PRs — a lone PR has no stack to navigate.
     async fn upsert_nav_comments(
         &self,
         prs: &[(String, u64)],
@@ -1368,18 +1391,19 @@ impl Engine {
             let body = nav_comment_body(prs, idx, yuji);
             let known_id = known.get(&pr).copied();
             async move {
-                let id = match known_id {
+                // Fast path: edit the comment we already know about. If that fails (e.g. the author
+                // deleted it), fall back to discovering or recreating it.
+                if let Some(id) = known_id {
+                    if forge.update_comment(id, &body).await.is_ok() {
+                        return Ok((pr, id));
+                    }
+                }
+                let id = match forge.find_comment(pr, NAV_MARKER).await? {
                     Some(id) => {
                         forge.update_comment(id, &body).await?;
                         id
                     }
-                    None => match forge.find_comment(pr, NAV_MARKER).await? {
-                        Some(id) => {
-                            forge.update_comment(id, &body).await?;
-                            id
-                        }
-                        None => forge.create_comment(pr, &body).await?,
-                    },
+                    None => forge.create_comment(pr, &body).await?,
                 };
                 Ok::<(u64, u64), anyhow::Error>((pr, id))
             }
@@ -1568,10 +1592,7 @@ impl Engine {
                 .filter_map(|b| b.pr.map(|pr| (b.name.clone(), pr)))
                 .collect();
             let yuji = self.vcs.config_get(YUJI_KEY)?.as_deref() == Some(YUJI_VALUE);
-            let n = self
-                .upsert_nav_comments(&stack_prs, yuji, &std::collections::HashMap::new())
-                .await?
-                .len();
+            let n = self.refresh_nav_comments(&stack_prs, yuji).await?;
             if n > 0 {
                 report.note(format!("updated stack navigation on {n} PRs"));
             }

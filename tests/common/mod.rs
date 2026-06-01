@@ -148,6 +148,17 @@ impl FakeForge {
         self.inner.lock().unwrap().events.clone()
     }
 
+    /// How many times a given op kind (e.g. "find_comment") was recorded.
+    pub fn count_events(&self, kind: &str) -> usize {
+        let prefix = format!("{kind}:");
+        self.inner.lock().unwrap().events.iter().filter(|e| e.starts_with(&prefix)).count()
+    }
+
+    /// Simulate the author deleting every comment on a PR (drives nav-comment self-heal).
+    pub fn delete_comments_on(&self, pr: u64) {
+        self.inner.lock().unwrap().comments.retain(|c| c.pr != pr);
+    }
+
     /// Simulate the author editing a PR's description (so tests can assert jjk leaves it alone).
     pub fn set_body(&self, branch: &str, body: &str) {
         self.inner.lock().unwrap().bodies.insert(branch.to_string(), body.to_string());
@@ -256,7 +267,8 @@ impl Forge for FakeForge {
     }
 
     async fn find_comment(&self, pr: u64, marker: &str) -> Result<Option<u64>> {
-        let st = self.inner.lock().unwrap();
+        let mut st = self.inner.lock().unwrap();
+        st.events.push(format!("find_comment:{pr}"));
         Ok(st
             .comments
             .iter()
@@ -279,9 +291,14 @@ impl Forge for FakeForge {
 
     async fn update_comment(&self, comment_id: u64, body: &str) -> Result<()> {
         let mut st = self.inner.lock().unwrap();
-        if let Some(c) = st.comments.iter_mut().find(|c| c.id == comment_id) {
-            c.body = body.to_string();
+        st.events.push(format!("update_comment:{comment_id}"));
+        match st.comments.iter_mut().find(|c| c.id == comment_id) {
+            Some(c) => {
+                c.body = body.to_string();
+                Ok(())
+            }
+            // Like gh: editing a comment that no longer exists is an error (drives the self-heal).
+            None => Err(jjk::error::JjkError::Msg(format!("comment {comment_id} not found")).into()),
         }
-        Ok(())
     }
 }
