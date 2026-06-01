@@ -151,7 +151,7 @@ impl Forge for GhCli {
         })
     }
 
-    async fn update_pr(&self, pr: u64, base: Option<&str>, body: Option<&str>) -> Result<()> {
+    async fn update_pr(&self, pr: u64, base: Option<&str>) -> Result<()> {
         let slug = self.slug()?.to_string();
         let num = pr.to_string();
         let mut args: Vec<&str> = vec!["pr", "edit", &num, "-R", &slug];
@@ -159,12 +159,8 @@ impl Forge for GhCli {
             args.push("--base");
             args.push(b);
         }
-        if let Some(b) = body {
-            args.push("--body");
-            args.push(b);
-        }
         if args.len() <= 5 {
-            return Ok(()); // nothing to change
+            return Ok(()); // nothing to change — never touches the body/description
         }
         self.run(&args).await?;
         Ok(())

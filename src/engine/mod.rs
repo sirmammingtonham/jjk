@@ -1296,9 +1296,9 @@ impl Engine {
             let number = match &existing[slot] {
                 Some(pr) => {
                     let pr = pr.number;
-                    self.forge()?
-                        .update_pr(pr, Some(&item.base), Some(&item.body))
-                        .await?;
+                    // Retarget the base only — never the body, so we don't clobber the author's
+                    // description on a re-submit.
+                    self.forge()?.update_pr(pr, Some(&item.base)).await?;
                     report.note(format!("updated #{} {} (base {})", pr, item.name, item.base));
                     pr
                 }
@@ -1509,7 +1509,7 @@ impl Engine {
                     // base branch was deleted on merge — you can't retarget a closed PR, so report.
                     match pr_by_head.get(&b.name).cloned().flatten() {
                         Some(p) if p.state == PrState::Open => {
-                            self.forge()?.update_pr(pr, Some(&base), None).await?;
+                            self.forge()?.update_pr(pr, Some(&base)).await?;
                             report.note(format!("#{pr} {} → base {base}", b.name));
                         }
                         Some(p) => report.note(format!(

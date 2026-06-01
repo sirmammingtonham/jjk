@@ -51,9 +51,9 @@ impl Forge for ReorderForge {
         self.stagger().await;
         self.inner.create_pr(head, base, title, body, draft).await
     }
-    async fn update_pr(&self, pr: u64, base: Option<&str>, body: Option<&str>) -> Result<()> {
+    async fn update_pr(&self, pr: u64, base: Option<&str>) -> Result<()> {
         self.stagger().await;
-        self.inner.update_pr(pr, base, body).await
+        self.inner.update_pr(pr, base).await
     }
     async fn is_merged(&self, pr: u64) -> Result<bool> {
         self.stagger().await;

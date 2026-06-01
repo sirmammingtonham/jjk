@@ -19,7 +19,10 @@ pub trait Forge: Send + Sync {
         body: &str,
         draft: bool,
     ) -> Result<PrRef>;
-    async fn update_pr(&self, pr: u64, base: Option<&str>, body: Option<&str>) -> Result<()>;
+    /// Update mutable metadata on an existing PR. **Never** the body/description — jjk sets the
+    /// description once at creation and then leaves it to the author, so a re-submit or sync can't
+    /// clobber edits. Today only the base branch is retargeted.
+    async fn update_pr(&self, pr: u64, base: Option<&str>) -> Result<()>;
     async fn is_merged(&self, pr: u64) -> Result<bool>;
 
     /// Id of the first comment on `pr` whose body contains `marker`, if any. Used to upsert the

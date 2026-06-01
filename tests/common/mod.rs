@@ -140,6 +140,11 @@ impl FakeForge {
         self.inner.lock().unwrap().drafts.get(branch).copied()
     }
 
+    /// Simulate the author editing a PR's description (so tests can assert jjk leaves it alone).
+    pub fn set_body(&self, branch: &str, body: &str) {
+        self.inner.lock().unwrap().bodies.insert(branch.to_string(), body.to_string());
+    }
+
     /// Mark a branch's PR merged (for sync tests).
     pub fn set_merged(&self, branch: &str) {
         let mut st = self.inner.lock().unwrap();
@@ -168,8 +173,8 @@ impl Forge for SharedForge {
     ) -> Result<PrRef> {
         self.0.create_pr(head, base, title, body, draft).await
     }
-    async fn update_pr(&self, pr: u64, base: Option<&str>, body: Option<&str>) -> Result<()> {
-        self.0.update_pr(pr, base, body).await
+    async fn update_pr(&self, pr: u64, base: Option<&str>) -> Result<()> {
+        self.0.update_pr(pr, base).await
     }
     async fn is_merged(&self, pr: u64) -> Result<bool> {
         self.0.is_merged(pr).await
@@ -220,17 +225,14 @@ impl Forge for FakeForge {
         Ok(pr)
     }
 
-    async fn update_pr(&self, pr: u64, base: Option<&str>, body: Option<&str>) -> Result<()> {
+    async fn update_pr(&self, pr: u64, base: Option<&str>) -> Result<()> {
         let mut st = self.inner.lock().unwrap();
-        let head = st.prs.iter().find(|p| p.number == pr).map(|p| p.head.clone());
         if let Some(p) = st.prs.iter_mut().find(|p| p.number == pr) {
             if let Some(b) = base {
                 p.base = b.to_string();
             }
         }
-        if let (Some(h), Some(b)) = (head, body) {
-            st.bodies.insert(h, b.to_string());
-        }
+        // Deliberately never records/changes the body: update_pr must not touch the description.
         Ok(())
     }
 
