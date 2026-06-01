@@ -5,7 +5,7 @@ pub mod stack;
 
 use crate::error::{JjkError, Result};
 use crate::forge::Forge;
-use crate::model::{ChangeId, CommitInfo, PrState};
+use crate::model::{ChangeId, CommitInfo, PrRef, PrState};
 use crate::prompt::{AutoFill, PrDraft, Prompter};
 use crate::state::State;
 use crate::vcs::{CommitScope, PushOpts, Vcs};
@@ -1277,19 +1277,30 @@ impl Engine {
         };
         drop(stack);
 
-        // Push + create/update the in-scope branches. get_pr (by head) keeps it idempotent.
-        for &i in &to_submit {
+        // Look up the existing PR (if any) for every in-scope branch *concurrently*: these are
+        // independent read-only `gh pr list` calls, so one round-trip's latency instead of N. The
+        // per-call query (by head, newest, any state) is unchanged. Doing them up front also fails
+        // before any push if the forge is unreachable. Results stay aligned with `to_submit`.
+        let existing: Vec<Option<PrRef>> = {
+            let forge = self.forge()?;
+            futures::future::try_join_all(to_submit.iter().map(|&i| forge.get_pr(&plan[i].name)))
+                .await?
+        };
+
+        // Push + create/update the in-scope branches. The push (a jj op) and the create/update stay
+        // sequential: pushes can't run concurrently (one jj op/repo) and create needs its base ref
+        // pushed first; the prompt for a new PR is interactive (one at a time).
+        for (slot, &i) in to_submit.iter().enumerate() {
             let item = &plan[i];
-            // Existing PR? Just push + update. Only prompt when creating a brand-new PR.
-            let existing = self.forge()?.get_pr(&item.name).await?;
             self.vcs.push(&remote, &item.name, PushOpts::default())?;
-            let number = match existing {
+            let number = match &existing[slot] {
                 Some(pr) => {
+                    let pr = pr.number;
                     self.forge()?
-                        .update_pr(pr.number, Some(&item.base), Some(&item.body))
+                        .update_pr(pr, Some(&item.base), Some(&item.body))
                         .await?;
-                    report.note(format!("updated #{} {} (base {})", pr.number, item.name, item.base));
-                    pr.number
+                    report.note(format!("updated #{} {} (base {})", pr, item.name, item.base));
+                    pr
                 }
                 None => {
                     let defaults = PrDraft {
@@ -1324,15 +1335,24 @@ impl Engine {
             .filter_map(|i| self.state.pr_of(&i.name).map(|pr| (i.name.clone(), pr)))
             .collect();
         if stack_prs.len() >= 2 {
-            for (idx, (_, pr)) in stack_prs.iter().enumerate() {
+            // Upsert each PR's nav comment concurrently — they target different PRs, so they're
+            // independent. Each task still does find→update/create in order for its own PR, keeping
+            // the upsert idempotent (one comment per PR, no duplicates on re-submit).
+            let forge = self.forge()?;
+            let tasks = stack_prs.iter().enumerate().map(|(idx, (_, pr))| {
+                let pr = *pr;
                 let body = nav_comment_body(&stack_prs, idx, yuji);
-                match self.forge()?.find_comment(*pr, NAV_MARKER).await? {
-                    Some(cid) => self.forge()?.update_comment(cid, &body).await?,
-                    None => {
-                        self.forge()?.create_comment(*pr, &body).await?;
+                async move {
+                    match forge.find_comment(pr, NAV_MARKER).await? {
+                        Some(cid) => forge.update_comment(cid, &body).await?,
+                        None => {
+                            forge.create_comment(pr, &body).await?;
+                        }
                     }
+                    Ok::<(), anyhow::Error>(())
                 }
-            }
+            });
+            futures::future::try_join_all(tasks).await?;
             report.note(format!("updated stack navigation on {} PRs", stack_prs.len()));
         }
         Ok(report)
@@ -1386,12 +1406,19 @@ impl Engine {
         // 2. fetch (advances local trunk; JJ_NOTES §9), then query merged-state.
         self.vcs.fetch(&self.state.config.remote)?;
         report.note(format!("fetched {}", self.state.config.remote));
-        let mut merged_names: Vec<String> = Vec::new();
-        for (name, pr) in &candidates {
-            if self.forge()?.is_merged(*pr).await? {
-                merged_names.push(name.clone());
-            }
-        }
+        // Query merged-state for all candidate PRs concurrently (independent reads by PR number) —
+        // one round-trip instead of N. Order is preserved by zipping back onto `candidates`.
+        let merged_flags = {
+            let forge = self.forge()?;
+            futures::future::try_join_all(candidates.iter().map(|(_, pr)| forge.is_merged(*pr)))
+                .await?
+        };
+        let merged_names: Vec<String> = candidates
+            .iter()
+            .zip(merged_flags)
+            .filter(|(_, merged)| *merged)
+            .map(|((name, _), _)| name.clone())
+            .collect();
         if merged_names.is_empty() {
             report.note("no merged PRs to reconcile");
         } else {
@@ -1445,6 +1472,23 @@ impl Engine {
             let remote = self.state.config.remote.clone();
             let survivors = self.derive_stack()?;
             let trunk_name = survivors.trunk_name.clone();
+
+            // Prefetch each pushable branch's PR record concurrently (read-only) so the sequential
+            // push/retarget pass below doesn't pay a `gh pr list` round-trip per branch. Same query
+            // as before (by head); conflicted branches are skipped anyway, so don't fetch them.
+            let pr_by_head: std::collections::HashMap<String, Option<PrRef>> = {
+                let forge = self.forge()?;
+                let names: Vec<String> = survivors
+                    .branches
+                    .iter()
+                    .filter(|b| b.tracked && b.pr.is_some() && !b.has_conflict())
+                    .map(|b| b.name.clone())
+                    .collect();
+                let recs =
+                    futures::future::try_join_all(names.iter().map(|n| forge.get_pr(n))).await?;
+                names.into_iter().zip(recs).collect()
+            };
+
             let mut prev_tracked: Option<String> = None;
             let mut pushed = 0usize;
             for b in survivors.branches.iter().filter(|b| b.tracked) {
@@ -1463,7 +1507,7 @@ impl Engine {
                     let base = prev_tracked.clone().unwrap_or_else(|| trunk_name.clone());
                     // Retarget best-effort: a dependent PR may have been closed by GitHub when its
                     // base branch was deleted on merge — you can't retarget a closed PR, so report.
-                    match self.forge()?.get_pr(&b.name).await? {
+                    match pr_by_head.get(&b.name).cloned().flatten() {
                         Some(p) if p.state == PrState::Open => {
                             self.forge()?.update_pr(pr, Some(&base), None).await?;
                             report.note(format!("#{pr} {} → base {base}", b.name));
