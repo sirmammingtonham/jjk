@@ -103,10 +103,12 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
 async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Result<ExitCode> {
     let mut engine = Engine::open(cwd)?;
     let mut conflicts = false;
+    let is_mutating = mutates(&command);
 
     // Follow a plain `git checkout`: if git HEAD moved out from under jj, reconcile so position
     // tracking is correct (jjk's fast reads skip jj's HEAD import). Surface where we landed.
-    if engine.reconcile_git_head().await? {
+    let reconciled = engine.reconcile_git_head().await?;
+    if reconciled {
         let here = engine.current_branch().await?.unwrap_or_else(|| "trunk".to_string());
         eprintln!("note: followed git HEAD (now on {here})");
     }
@@ -114,7 +116,7 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
     // Make a mutating jjk command a single undo unit: record a checkpoint so `jjk undo` can
     // `jj op restore` past *all* the jj operations the command performs (not just the last).
     // Best-effort — never block the real command if the checkpoint can't be written.
-    if mutates(&command) {
+    if is_mutating {
         let _ = engine.checkpoint().await;
     }
 
@@ -344,8 +346,12 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
     }
 
     // Keep plain git in sync: re-attach git HEAD to the branch jjk is now on (jj detaches it when
-    // it moves @). Best-effort — never fail a command over this.
-    let _ = engine.sync_git_head_to_current().await;
+    // it moves @). Best-effort — never fail a command over this. Only needed when `@` may have
+    // moved: a mutating command, or a read that just followed an external git checkout. Pure reads
+    // leave `@`/HEAD untouched, so skip the (otherwise per-command) git-HEAD reattach there.
+    if is_mutating || reconciled {
+        let _ = engine.sync_git_head_to_current().await;
+    }
 
     Ok(if conflicts {
         // Conflicts are reported, not fatal (ARCH D4); use a distinct nonzero code.

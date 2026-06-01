@@ -303,25 +303,20 @@ impl Engine {
         let cur_tip_id = cur.as_ref().map(|(_, id)| id.clone()).unwrap_or_else(|| trunk_id.clone());
         let cur_tip = cur_tip_id.as_str();
 
-        // Topmost bookmarked tip in the stack containing the current position; if none, the current
-        // branch tip itself (reusing the id we already resolved — no extra query).
-        let upmost = self
-            .vcs
-            .resolve(&format!("heads(({cur_tip}:: ~ {cur_tip}) & {STACK_BOOKMARKS})"))
-            .await?;
-        let top_id = upmost
-            .into_iter()
-            .next()
-            .map(|c| c.change_id)
-            .unwrap_or(cur_tip_id);
-
-        // Mutable ancestry from trunk (exclusive) up to top (inclusive), newest-first → reverse.
-        // `& mutable()` excludes already-merged / shared (immutable) commits, which are part of
-        // trunk's world, not the editable stack. Without this, a branch built on top of a
-        // previously-merged stack would display (and try to rebase) those immutable commits.
+        // Mutable ancestry from trunk (exclusive) up to the **top of the stack** (inclusive), in one
+        // query. The top is the topmost bookmarked tip in the stack containing the current position,
+        // or the current tip itself if there is no upstack bookmark — expressed as the nested
+        // `(heads(...) | cur_tip)` sub-revset so we don't need a separate round-trip to resolve it
+        // first. `& mutable()` excludes already-merged / shared (immutable) commits, which are part
+        // of trunk's world, not the editable stack (without it, a branch built atop a previously
+        // merged stack would display and try to rebase those immutable commits). Bounding the range
+        // by the top **bookmark** (not `cur_tip::`) also excludes the empty `@` and any WIP above it.
+        let top_expr = format!("heads(({cur_tip}:: ~ {cur_tip}) & {STACK_BOOKMARKS})");
         let mut commits = self
             .vcs
-            .resolve(&format!("({}..{}) & mutable()", trunk_revset, top_id.as_str()))
+            .resolve(&format!(
+                "({trunk_revset}..({top_expr} | {cur_tip})) & mutable()"
+            ))
             .await?;
         commits.reverse(); // bottom → top
 
