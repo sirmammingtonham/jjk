@@ -441,8 +441,13 @@ impl Vcs for JjCli {
         }
     }
 
-    fn fetch(&self, remote: &str) -> Result<()> {
-        self.run_with_stderr(&["git", "fetch", "--remote", remote])?;
+    fn fetch(&self, remote: &str, branch: Option<&str>) -> Result<()> {
+        let mut args = vec!["git", "fetch", "--remote", remote];
+        if let Some(b) = branch {
+            args.push("--branch");
+            args.push(b);
+        }
+        self.run_with_stderr(&args)?;
         Ok(())
     }
 

@@ -1151,7 +1151,8 @@ impl Engine {
 
     pub fn fetch(&self) -> Result<Report> {
         let mut report = Report::default();
-        self.vcs.fetch(&self.state.config.remote)?;
+        self.vcs
+            .fetch(&self.state.config.remote, Some(&self.state.config.trunk))?;
         report.note(format!("fetched {}", self.state.config.remote));
         Ok(report)
     }
@@ -1170,7 +1171,8 @@ impl Engine {
     /// (that's `sync`). The local trunk bookmark fast-forwards on fetch (JJ_NOTES §9).
     pub fn pull(&mut self) -> Result<Report> {
         let mut report = Report::default();
-        self.vcs.fetch(&self.state.config.remote)?;
+        self.vcs
+            .fetch(&self.state.config.remote, Some(&self.state.config.trunk))?;
         report.note(format!("fetched {}", self.state.config.remote));
         self.ensure_fresh(&mut report)?;
         let moved = self.rebase_stack_onto_trunk()?;
@@ -1525,7 +1527,8 @@ impl Engine {
         // auto-advances *tracked* local bookmarks on fetch, so without this a non-tracking trunk
         // would stay behind and the stack wouldn't rebase onto the new trunk (it only moves the
         // remote-tracking `trunk@remote`). Then query merged-state.
-        self.vcs.fetch(&self.state.config.remote)?;
+        self.vcs
+            .fetch(&self.state.config.remote, Some(&self.state.config.trunk))?;
         report.note(format!("fetched {}", self.state.config.remote));
         self.advance_trunk_to_remote(&mut report)?;
         // Query merged-state for all candidate PRs concurrently (independent reads by PR number) —

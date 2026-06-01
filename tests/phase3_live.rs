@@ -94,7 +94,7 @@ async fn run_body(
 ) -> anyhow::Result<()> {
     // Ensure `main` exists (PR bases need it). Reuse the remote's main if a prior run created it,
     // else seed and push it.
-    engine.vcs().fetch("origin").ok();
+    engine.vcs().fetch("origin", None).ok();
     let remote_main = engine
         .vcs()
         .resolve("main@origin")

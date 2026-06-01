@@ -90,10 +90,11 @@ fn push_auto_resolves_a_conflicted_bookmark() {
     jj(b, &["new"]);
     jj(b, &["git", "push", "--remote", "origin", "-b", "feat"]);
 
-    // Rewrite `feat` locally a different way, then fetch — the bookmark becomes conflicted.
+    // Rewrite `feat` locally a different way, then fetch `feat` — the bookmark becomes conflicted.
+    // (engine.fetch() only fetches trunk now, so fetch the branch directly to reproduce the clash.)
     write(&root, "f.txt", "x\nlocal2\n");
     h.engine.commit("feat more local").unwrap();
-    h.engine.fetch().unwrap();
+    jj(&root, &["git", "fetch", "--remote", "origin", "--branch", "feat"]);
 
     // Previously errored "Bookmark feat is conflicted"; now resolves to local and pushes.
     h.engine.push_current().expect("push resolves the conflicted bookmark to local and succeeds");

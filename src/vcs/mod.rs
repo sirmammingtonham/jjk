@@ -113,7 +113,10 @@ pub trait Vcs {
 
     // ---- remote (git interop lives inside the VCS backend) ----
 
-    fn fetch(&self, remote: &str) -> Result<()>;
+    /// Fetch from `remote`. When `branch` is `Some`, fetch only that bookmark (the trunk) instead
+    /// of every remote branch — stacking only needs trunk advanced, and a full fetch can fail on
+    /// unrelated remote branches that won't fast-forward (`refs/remotes/...` update errors).
+    fn fetch(&self, remote: &str, branch: Option<&str>) -> Result<()>;
     fn push(&self, remote: &str, bookmark: &str, opts: PushOpts) -> Result<()>;
     /// Push all pending bookmark deletions to the remote (`jj git push --deleted`).
     fn push_deleted(&self, remote: &str) -> Result<()>;

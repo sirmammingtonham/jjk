@@ -75,7 +75,7 @@ async fn live_sync_after_squash_merge() {
 
 async fn run_body(engine: &mut Engine, root: &Path, a: &str, b: &str) -> anyhow::Result<()> {
     // Ensure main exists (reuse if a prior run seeded it).
-    engine.vcs().fetch("origin").ok();
+    engine.vcs().fetch("origin", None).ok();
     let has_main = engine
         .vcs()
         .resolve("main@origin")
