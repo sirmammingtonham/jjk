@@ -129,6 +129,10 @@ pub trait Vcs {
     fn remotes(&self) -> Result<Vec<String>>;
     /// URL of a configured remote, if present.
     fn remote_url(&self, name: &str) -> Result<Option<String>>;
+
+    /// Value of a jj config key (`jj config get <key>`), or `None` if it is unset. Lets jjk read
+    /// user-set knobs (e.g. an opt-in flag in the repo's jj config) without its own config file.
+    fn config_get(&self, key: &str) -> Result<Option<String>>;
 }
 
 /// Mutation handle yielded inside [`Vcs::transaction`].

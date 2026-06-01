@@ -4,11 +4,14 @@
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
 use jjk::cli::{
-    BranchCmd, Cli, Command, DownstackCmd, RepoCmd, StashAction, UpstackCmd, WorktreeCmd,
+    BranchCmd, Cli, Command, DownstackCmd, RepoCmd, StashAction, SubmitArgs, UpstackCmd,
+    WorktreeCmd,
 };
-use jjk::engine::{Engine, NavDir, SubmitScope};
+use jjk::engine::{Engine, NavDir, SubmitOptions, SubmitScope};
+use jjk::prompt::{PrDraft, Prompter};
 use jjk::render;
 use jjk::vcs::CommitScope;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -218,14 +221,17 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         Command::Branch(BranchCmd::Split(args)) => {
             render::print_report(&engine.branch_split(&args.name, &args.at)?);
         }
-        Command::Branch(BranchCmd::Submit) => {
-            render::print_report(&engine.submit(SubmitScope::Branch).await?);
+        Command::Branch(BranchCmd::Submit(args)) => {
+            let opts = prepare_submit(&mut engine, &args);
+            render::print_report(&engine.submit_with(SubmitScope::Branch, opts).await?);
         }
-        Command::Upstack(UpstackCmd::Submit) => {
-            render::print_report(&engine.submit(SubmitScope::Upstack).await?);
+        Command::Upstack(UpstackCmd::Submit(args)) => {
+            let opts = prepare_submit(&mut engine, &args);
+            render::print_report(&engine.submit_with(SubmitScope::Upstack, opts).await?);
         }
-        Command::Downstack(DownstackCmd::Submit) => {
-            render::print_report(&engine.submit(SubmitScope::Downstack).await?);
+        Command::Downstack(DownstackCmd::Submit(args)) => {
+            let opts = prepare_submit(&mut engine, &args);
+            render::print_report(&engine.submit_with(SubmitScope::Downstack, opts).await?);
         }
         Command::Track(arg) => {
             render::print_report(&engine.set_tracked(arg.name.as_deref(), true)?);
@@ -309,8 +315,9 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
         }
-        Command::Submit => {
-            let report = engine.submit(SubmitScope::Stack).await?;
+        Command::Submit(args) => {
+            let opts = prepare_submit(&mut engine, &args);
+            let report = engine.submit_with(SubmitScope::Stack, opts).await?;
             render::print_report(&report);
         }
         Command::Sync(args) => {
@@ -333,4 +340,98 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Decide how `submit` gathers details for new PRs and install a terminal prompter when fitting.
+/// Interactive unless `--fill` was passed or stdio isn't a tty (scripts/CI fall back to the
+/// engine's non-interactive default). Returns the engine-level options (draft).
+fn prepare_submit(engine: &mut Engine, args: &SubmitArgs) -> SubmitOptions {
+    let interactive =
+        !args.fill && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if interactive {
+        engine.set_prompter(Box::new(TerminalPrompter));
+    }
+    SubmitOptions { draft: args.draft }
+}
+
+/// Terminal implementation of the `Prompter` port: git-spice-style Title → Body → Draft prompts
+/// when `submit` creates a new PR. Lives in `main` so the library never touches stdin/$EDITOR.
+/// Prompts go to stderr so the rendered report on stdout stays pipe-clean.
+struct TerminalPrompter;
+
+impl Prompter for TerminalPrompter {
+    fn new_pr(
+        &self,
+        branch: &str,
+        base: &str,
+        defaults: PrDraft,
+    ) -> jjk::error::Result<Option<PrDraft>> {
+        eprintln!("\nCreating pull request: {branch} → {base}");
+        let title = match prompt_line(&format!("Title [{}]: ", defaults.title))? {
+            Some(s) if !s.is_empty() => s,
+            _ => defaults.title,
+        };
+        let body = prompt_body(&defaults.body)?;
+        let draft = prompt_yes_no("Draft?", defaults.draft)?;
+        Ok(Some(PrDraft { title, body, draft }))
+    }
+}
+
+/// Print a prompt to stderr and read one line from stdin. `None` on EOF (e.g. `^D`).
+fn prompt_line(prompt: &str) -> jjk::error::Result<Option<String>> {
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    if std::io::stdin().lock().read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(line.trim_end_matches(['\n', '\r']).to_string()))
+}
+
+/// `[y/N]`-style confirm with a pre-selected default (empty/EOF answer takes the default).
+fn prompt_yes_no(prompt: &str, default_yes: bool) -> jjk::error::Result<bool> {
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    Ok(match prompt_line(&format!("{prompt} {hint}: "))? {
+        Some(s) if !s.trim().is_empty() => matches!(s.trim().chars().next(), Some('y' | 'Y')),
+        _ => default_yes,
+    })
+}
+
+/// Body prompt: keep the derived default, or press `e` to edit it in `$EDITOR`.
+fn prompt_body(default: &str) -> jjk::error::Result<String> {
+    match prompt_line("Body: press [e] to edit in $EDITOR, [enter] to accept the default: ")? {
+        Some(s) if s.trim().eq_ignore_ascii_case("e") => Ok(edit_in_editor(default)),
+        _ => Ok(default.to_string()),
+    }
+}
+
+/// Open `$VISUAL`/`$EDITOR` (fallback `vi`) on a temp file seeded with `initial`; return the edited
+/// text. On any failure, keep `initial` — a missing editor shouldn't abort a submit.
+fn edit_in_editor(initial: &str) -> String {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let path = std::env::temp_dir().join(format!("jjk-pr-body-{}.md", std::process::id()));
+    if std::fs::write(&path, initial).is_err() {
+        return initial.to_string();
+    }
+    let mut parts = editor.split_whitespace();
+    let prog = parts.next().unwrap_or("vi");
+    let status = std::process::Command::new(prog).args(parts).arg(&path).status();
+    let body = match status {
+        Ok(st) if st.success() => {
+            std::fs::read_to_string(&path).unwrap_or_else(|_| initial.to_string())
+        }
+        _ => {
+            eprintln!("note: couldn't run $EDITOR ({editor}); keeping the default body");
+            initial.to_string()
+        }
+    };
+    let _ = std::fs::remove_file(&path);
+    let trimmed = body.trim_end();
+    if trimmed.is_empty() {
+        initial.to_string()
+    } else {
+        format!("{trimmed}\n")
+    }
 }

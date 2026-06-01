@@ -66,9 +66,12 @@ jjk submit
 ```
 
 This pushes each branch and opens a PR per branch, each based on the one below it
-(`feat-a` onto `main`, `feat-b` onto `feat-a`). It's idempotent, so you can edit and re-run
-`jjk submit` to update the same PRs in place without creating duplicates. Each PR gets a
-stack-navigation comment showing its position.
+(`feat-a` onto `main`, `feat-b` onto `feat-a`). For each new branch it prompts for the PR
+title (defaulting to the commit subject), body (press `e` to edit in `$EDITOR`), and whether
+it's a draft — pass `--fill` to skip the prompts and use the commit messages, or `--draft` to
+default new PRs to drafts. It's idempotent, so you can edit and re-run `jjk submit` to update
+the same PRs in place without creating duplicates (existing PRs are updated without
+prompting). Each PR gets a stack-navigation comment showing its position.
 
 ## 5. After a PR merges
 

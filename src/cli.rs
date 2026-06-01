@@ -75,7 +75,7 @@ pub enum Command {
     /// Push the current branch.
     Push,
     /// Create/update PRs for the whole stack (bottom-up, correctly based).
-    Submit,
+    Submit(SubmitArgs),
     /// Submit the current branch and everything above it.
     #[command(subcommand)]
     Upstack(UpstackCmd),
@@ -162,7 +162,17 @@ pub enum BranchCmd {
     /// Split the current branch at a commit into two branches.
     Split(BranchSplitArgs),
     /// Create/update the PR for just the current branch.
-    Submit,
+    Submit(SubmitArgs),
+}
+
+#[derive(Args, Debug, Default, Clone)]
+pub struct SubmitArgs {
+    /// Don't prompt; fill new PRs' title/body from the commit messages (use for scripts/CI).
+    #[arg(short, long)]
+    pub fill: bool,
+    /// Open newly-created PRs as drafts.
+    #[arg(long)]
+    pub draft: bool,
 }
 
 #[derive(Args, Debug)]
@@ -176,13 +186,13 @@ pub struct BranchSplitArgs {
 #[derive(Subcommand, Debug)]
 pub enum UpstackCmd {
     /// Submit the current branch and everything above it.
-    Submit,
+    Submit(SubmitArgs),
 }
 
 #[derive(Subcommand, Debug)]
 pub enum DownstackCmd {
     /// Submit the current branch and everything below it.
-    Submit,
+    Submit(SubmitArgs),
 }
 
 #[derive(Args, Debug)]

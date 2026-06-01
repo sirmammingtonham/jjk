@@ -80,6 +80,10 @@ struct FakeState {
     prs: Vec<PrRef>,
     comments: Vec<FakeComment>,
     next_comment: u64,
+    /// Latest body seen per head (on create or update), for assertions.
+    bodies: std::collections::HashMap<String, String>,
+    /// Draft flag captured at create time, per head.
+    drafts: std::collections::HashMap<String, bool>,
 }
 
 #[derive(Clone)]
@@ -126,6 +130,16 @@ impl FakeForge {
             .cloned()
     }
 
+    /// Latest PR body seen for a branch's head (create or update).
+    pub fn body_for(&self, branch: &str) -> Option<String> {
+        self.inner.lock().unwrap().bodies.get(branch).cloned()
+    }
+
+    /// Whether the PR for a branch was created as a draft.
+    pub fn draft_for(&self, branch: &str) -> Option<bool> {
+        self.inner.lock().unwrap().drafts.get(branch).copied()
+    }
+
     /// Mark a branch's PR merged (for sync tests).
     pub fn set_merged(&self, branch: &str) {
         let mut st = self.inner.lock().unwrap();
@@ -144,8 +158,15 @@ impl Forge for SharedForge {
     async fn get_pr(&self, branch: &str) -> Result<Option<PrRef>> {
         self.0.get_pr(branch).await
     }
-    async fn create_pr(&self, head: &str, base: &str, title: &str, body: &str) -> Result<PrRef> {
-        self.0.create_pr(head, base, title, body).await
+    async fn create_pr(
+        &self,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<PrRef> {
+        self.0.create_pr(head, base, title, body, draft).await
     }
     async fn update_pr(&self, pr: u64, base: Option<&str>, body: Option<&str>) -> Result<()> {
         self.0.update_pr(pr, base, body).await
@@ -170,13 +191,21 @@ impl Forge for FakeForge {
         Ok(self.pr_for(branch))
     }
 
-    async fn create_pr(&self, head: &str, base: &str, title: &str, body: &str) -> Result<PrRef> {
+    async fn create_pr(
+        &self,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<PrRef> {
         let mut st = self.inner.lock().unwrap();
         // Idempotency guard: never create a duplicate for the same head.
         if st.prs.iter().any(|p| p.head == head) {
             panic!("create_pr called for existing head '{head}' — not idempotent");
         }
-        let _ = body;
+        st.bodies.insert(head.to_string(), body.to_string());
+        st.drafts.insert(head.to_string(), draft);
         let number = st.next;
         st.next += 1;
         let pr = PrRef {
@@ -191,12 +220,16 @@ impl Forge for FakeForge {
         Ok(pr)
     }
 
-    async fn update_pr(&self, pr: u64, base: Option<&str>, _body: Option<&str>) -> Result<()> {
+    async fn update_pr(&self, pr: u64, base: Option<&str>, body: Option<&str>) -> Result<()> {
         let mut st = self.inner.lock().unwrap();
+        let head = st.prs.iter().find(|p| p.number == pr).map(|p| p.head.clone());
         if let Some(p) = st.prs.iter_mut().find(|p| p.number == pr) {
             if let Some(b) = base {
                 p.base = b.to_string();
             }
+        }
+        if let (Some(h), Some(b)) = (head, body) {
+            st.bodies.insert(h, b.to_string());
         }
         Ok(())
     }

@@ -58,9 +58,11 @@ description: Every jjk command at a glance.
 | `jjk fetch` | Fetch from the remote. |
 | `jjk pull` | Fetch trunk and rebase the current stack onto it (no merged-PR detection, no push). |
 | `jjk push` | Push the current branch (force-with-lease). |
-| `jjk submit` | Push the whole stack and create/update a PR per branch, each based on the one below it. Idempotent; updates the stack-navigation comment. |
+| `jjk submit` | Push the whole stack and create/update a PR per branch, each based on the one below it. For each **new** branch it prompts for the PR title, body, and draft status (title defaults to the commit subject; press `e` at the body prompt to edit in `$EDITOR`). Branches that already have a PR are updated without prompting. Idempotent; updates the stack-navigation comment. |
 | `jjk branch submit` | Submit just the current branch's PR. |
 | `jjk upstack submit` / `jjk downstack submit` | Submit only the current branch and everything above / below it. Bases still point at each branch's real downstack branch. |
+| `jjk submit --fill` | Don't prompt — fill new PRs' title/body from the commit messages. (Also implied when stdout isn't a terminal, e.g. CI.) |
+| `jjk submit --draft` | Open newly-created PRs as drafts. Pre-selects the draft prompt; has no effect on PRs that already exist. |
 | `jjk sync` | Fetch, reconcile merged PRs, rebase survivors onto trunk, force-push, and retarget PR bases. Handles squash- and merge-commit landings. |
 | `jjk sync -n` / `--no-push` | Reconcile local state only (fetch, drop merged branches, rebase onto trunk). Doesn't push branches or retarget PRs. Faster, and safe when you're not ready to touch the remote. |
 

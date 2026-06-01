@@ -117,15 +117,24 @@ impl Forge for GhCli {
         Ok(prs.into_iter().next().map(Into::into))
     }
 
-    async fn create_pr(&self, head: &str, base: &str, title: &str, body: &str) -> Result<PrRef> {
+    async fn create_pr(
+        &self,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<PrRef> {
         let slug = self.slug()?.to_string();
         // `gh pr create` prints the PR URL; fetch the structured record afterwards.
-        let url = self
-            .run(&[
-                "pr", "create", "-R", &slug, "--head", head, "--base", base, "--title", title,
-                "--body", body,
-            ])
-            .await?;
+        let mut args = vec![
+            "pr", "create", "-R", &slug, "--head", head, "--base", base, "--title", title,
+            "--body", body,
+        ];
+        if draft {
+            args.push("--draft");
+        }
+        let url = self.run(&args).await?;
         let url = url.trim();
         let number = url
             .rsplit('/')

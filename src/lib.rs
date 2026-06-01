@@ -5,6 +5,7 @@
 //! - [`vcs`]     the `Vcs` port + adapters (`jj_cli` today)
 //! - [`forge`]   the `Forge` port + adapters (`gh_cli`)
 //! - [`engine`]  verb → ordered plan of VCS/state/forge ops; depends only on the traits
+//! - [`prompt`]  the `Prompter` port for interactive PR details (terminal impl lives in `main`)
 //! - [`state`]   `.jj/jjk/state.toml` (branch↔PR map + config)
 //! - [`render`]  `ls`/`status` output
 //! - [`cli`]     clap vocabulary
@@ -14,6 +15,7 @@ pub mod engine;
 pub mod error;
 pub mod forge;
 pub mod model;
+pub mod prompt;
 pub mod render;
 pub mod state;
 pub mod vcs;

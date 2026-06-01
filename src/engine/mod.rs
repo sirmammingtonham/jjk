@@ -6,6 +6,7 @@ pub mod stack;
 use crate::error::{JjkError, Result};
 use crate::forge::Forge;
 use crate::model::{ChangeId, CommitInfo, PrState};
+use crate::prompt::{AutoFill, PrDraft, Prompter};
 use crate::state::State;
 use crate::vcs::{CommitScope, PushOpts, Vcs};
 use stack::{Branch, Stack};
@@ -47,6 +48,9 @@ pub struct Engine {
     /// Lazily built: forge construction queries the remote, so local commands (ls/commit/…) that
     /// never touch the forge don't pay for it.
     forge: std::cell::OnceCell<Box<dyn Forge>>,
+    /// How `submit` gathers details for a new PR. Defaults to [`AutoFill`] (non-interactive); `main`
+    /// installs a terminal prompter when stdio is a tty and `--fill` wasn't passed.
+    prompter: Box<dyn Prompter>,
 }
 
 impl Engine {
@@ -62,7 +66,14 @@ impl Engine {
             state,
             forge_backend: forge_backend.into(),
             forge: std::cell::OnceCell::new(),
+            prompter: Box::new(AutoFill),
         }
+    }
+
+    /// Install the prompter `submit` uses to gather details for new PRs (terminal prompter from
+    /// `main`; tests/CI keep the [`AutoFill`] default).
+    pub fn set_prompter(&mut self, prompter: Box<dyn Prompter>) {
+        self.prompter = prompter;
     }
 
     pub fn vcs(&self) -> &dyn Vcs {
@@ -1203,13 +1214,22 @@ impl Engine {
     }
 
     /// `jjk submit` — push tracked branches bottom-up and create/update their PRs with correct
-    /// bases (downstack tracked branch, or trunk for the bottom). Idempotent.
+    /// bases (downstack tracked branch, or trunk for the bottom). Idempotent. Uses the default
+    /// (non-interactive) submit options; see [`submit_with`](Engine::submit_with).
     pub async fn submit(&mut self, scope: SubmitScope) -> Result<Report> {
+        self.submit_with(scope, SubmitOptions::default()).await
+    }
+
+    /// Like [`submit`](Engine::submit) but with explicit options. For each **new** branch (no PR
+    /// yet) the installed [`Prompter`] gathers the title/body/draft; existing PRs are just updated.
+    pub async fn submit_with(&mut self, scope: SubmitScope, opts: SubmitOptions) -> Result<Report> {
         let mut report = Report::default();
         self.ensure_fresh(&mut report)?;
         let stack = self.derive_stack()?;
         let remote = self.state.config.remote.clone();
         let trunk_name = stack.trunk_name.clone();
+        // Easter egg: a user can opt a PR-body flourish in via their jj config (undocumented).
+        let yuji = self.vcs.config_get(YUJI_KEY)?.as_deref() == Some(YUJI_VALUE);
 
         // Full tracked list (bottom→top) with correct bases. Bases come from the *whole* stack —
         // a subset submit still bases each PR on its real downstack branch, not the subset.
@@ -1260,8 +1280,10 @@ impl Engine {
         // Push + create/update the in-scope branches. get_pr (by head) keeps it idempotent.
         for &i in &to_submit {
             let item = &plan[i];
+            // Existing PR? Just push + update. Only prompt when creating a brand-new PR.
+            let existing = self.forge()?.get_pr(&item.name).await?;
             self.vcs.push(&remote, &item.name, PushOpts::default())?;
-            let number = match self.forge()?.get_pr(&item.name).await? {
+            let number = match existing {
                 Some(pr) => {
                     self.forge()?
                         .update_pr(pr.number, Some(&item.base), Some(&item.body))
@@ -1270,11 +1292,24 @@ impl Engine {
                     pr.number
                 }
                 None => {
+                    let defaults = PrDraft {
+                        title: item.title.clone(),
+                        body: item.body.clone(),
+                        draft: opts.draft,
+                    };
+                    let Some(d) = self.prompter.new_pr(&item.name, &item.base, defaults)? else {
+                        report.note(format!("skipped {} (no PR created)", item.name));
+                        continue;
+                    };
                     let pr = self
                         .forge()?
-                        .create_pr(&item.name, &item.base, &item.title, &item.body)
+                        .create_pr(&item.name, &item.base, &d.title, &d.body, d.draft)
                         .await?;
-                    report.note(format!("created #{} {} (base {})", pr.number, item.name, item.base));
+                    let kind = if d.draft { "draft " } else { "" };
+                    report.note(format!(
+                        "created {}#{} {} (base {})",
+                        kind, pr.number, item.name, item.base
+                    ));
                     pr.number
                 }
             };
@@ -1290,7 +1325,7 @@ impl Engine {
             .collect();
         if stack_prs.len() >= 2 {
             for (idx, (_, pr)) in stack_prs.iter().enumerate() {
-                let body = nav_comment_body(&stack_prs, idx);
+                let body = nav_comment_body(&stack_prs, idx, yuji);
                 match self.forge()?.find_comment(*pr, NAV_MARKER).await? {
                     Some(cid) => self.forge()?.update_comment(cid, &body).await?,
                     None => {
@@ -1310,7 +1345,7 @@ const NAV_MARKER: &str = "<!-- jjk:nav -->";
 /// Build the stack-navigation comment for the PR at `current_idx` in `prs` (bottom→top). The PR
 /// numbers expand into GitHub's rich previews on their own, so we list just `#N`; a prominent
 /// footer shows this PR's position (`x/N`) and links jjk.
-fn nav_comment_body(prs: &[(String, u64)], current_idx: usize) -> String {
+fn nav_comment_body(prs: &[(String, u64)], current_idx: usize, yuji: bool) -> String {
     let n = prs.len();
     let mut s = format!("**🥞 This change is part of the following stack · PR {}/{}**\n\n", current_idx + 1, n);
     for (i, (_branch, pr)) in prs.iter().enumerate() {
@@ -1319,6 +1354,11 @@ fn nav_comment_body(prs: &[(String, u64)], current_idx: usize) -> String {
         s.push_str(&format!("{indent}- #{pr}{marker}\n"));
     }
     s.push_str("\nManaged by [jjk](https://github.com/sirmammingtonham/jjk).\n");
+    if yuji {
+        s.push('\n');
+        s.push_str(YUJI_FLOURISH);
+        s.push('\n');
+    }
     s.push_str(NAV_MARKER);
     s.push('\n');
     s
@@ -1465,12 +1505,26 @@ fn pr_body(branch: &Branch, base: &str) -> String {
     body
 }
 
+/// Opt-in (undocumented) jj config key/value that toggles the PR-body flourish, and the flourish
+/// itself. Set `yuji = "it_doesnt_matter"` in jj config to enable.
+const YUJI_KEY: &str = "yuji";
+const YUJI_VALUE: &str = "it_doesnt_matter";
+const YUJI_FLOURISH: &str = "\n![](https://media.tenor.com/Ax5XJTSDE6kAAAAe/yuji-itadori-son.png)";
+
 #[derive(Clone, Copy, Debug)]
 pub enum NavDir {
     Up,
     Down,
     Top,
     Bottom,
+}
+
+/// Options for [`Engine::submit_with`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SubmitOptions {
+    /// Create newly-opened PRs as drafts. Pre-fills the prompt's draft default; with `AutoFill`
+    /// (`--fill`/non-TTY) it is the final value. Has no effect on PRs that already exist.
+    pub draft: bool,
 }
 
 /// Which branches `submit` operates on, relative to the current branch.

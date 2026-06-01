@@ -555,6 +555,21 @@ impl Vcs for JjCli {
             }
         }))
     }
+
+    fn config_get(&self, key: &str) -> Result<Option<String>> {
+        // `jj config get <key>` prints the value, or exits non-zero when the key is unset. A
+        // missing key is not an error here — it's just `None`.
+        let out = Command::new("jj")
+            .arg("-R")
+            .arg(&self.root)
+            .args(["config", "get", key])
+            .output()
+            .context("failed to spawn `jj`")?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
+    }
 }
 
 impl JjCli {
