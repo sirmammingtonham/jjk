@@ -4,7 +4,7 @@
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
 use jjk::cli::{
-    BranchCmd, Cli, Command, DownstackCmd, RepoCmd, StashAction, SubmitArgs, UpstackCmd,
+    BranchCmd, Cli, Command, DownstackCmd, PrCmd, RepoCmd, StashAction, SubmitArgs, UpstackCmd,
     WorktreeCmd,
 };
 use jjk::engine::{Engine, NavDir, SubmitOptions, SubmitScope};
@@ -53,6 +53,7 @@ fn mutates(command: &Command) -> bool {
             | Command::Ll
             | Command::Branch(BranchCmd::Diff)
             | Command::Worktree(WorktreeCmd::List)
+            | Command::Pr(_)
             | Command::Undo
     )
 }
@@ -318,6 +319,12 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             let report = engine.pull()?;
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
+        }
+        Command::Pr(PrCmd::View(args)) => {
+            // On --print, emit the URL; otherwise `gh` opened the browser and printed its own note.
+            if let Some(url) = engine.pr_view(args.print).await? {
+                println!("{url}");
+            }
         }
         Command::Submit(args) => {
             let opts = prepare_submit(&mut engine, &args);

@@ -1225,6 +1225,17 @@ impl Engine {
         Ok(n)
     }
 
+    /// `jjk pr view` — the current branch's PR. With `print`, return its URL (don't open a browser);
+    /// otherwise open it in the browser and return `None`. Errors if not on a branch, or the branch
+    /// has no submitted PR.
+    pub async fn pr_view(&self, print: bool) -> Result<Option<String>> {
+        let branch = self.current_branch()?.ok_or(JjkError::NotOnBranch)?;
+        let pr = self.state.pr_of(&branch).ok_or_else(|| {
+            JjkError::Msg(format!("no PR for '{branch}' yet — run `jjk submit` first"))
+        })?;
+        self.forge()?.view_pr(pr, !print).await
+    }
+
     /// `jjk submit` — push tracked branches bottom-up and create/update their PRs with correct
     /// bases (downstack tracked branch, or trunk for the bottom). Idempotent. Uses the default
     /// (non-interactive) submit options; see [`submit_with`](Engine::submit_with).

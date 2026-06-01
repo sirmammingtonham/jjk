@@ -198,6 +198,9 @@ impl Forge for SharedForge {
     async fn is_merged(&self, pr: u64) -> Result<bool> {
         self.0.is_merged(pr).await
     }
+    async fn view_pr(&self, pr: u64, web: bool) -> Result<Option<String>> {
+        self.0.view_pr(pr, web).await
+    }
     async fn find_comment(&self, pr: u64, marker: &str) -> Result<Option<u64>> {
         self.0.find_comment(pr, marker).await
     }
@@ -264,6 +267,16 @@ impl Forge for FakeForge {
             .find(|p| p.number == pr)
             .map(|p| p.state == PrState::Merged)
             .unwrap_or(false))
+    }
+
+    async fn view_pr(&self, pr: u64, web: bool) -> Result<Option<String>> {
+        let mut st = self.inner.lock().unwrap();
+        st.events.push(format!("view_pr:{pr}:{}", if web { "web" } else { "print" }));
+        if web {
+            Ok(None)
+        } else {
+            Ok(Some(format!("https://example.test/pr/{pr}")))
+        }
     }
 
     async fn find_comment(&self, pr: u64, marker: &str) -> Result<Option<u64>> {

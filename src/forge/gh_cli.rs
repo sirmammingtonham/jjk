@@ -181,6 +181,22 @@ impl Forge for GhCli {
         Ok(map_state(&s.state) == PrState::Merged)
     }
 
+    async fn view_pr(&self, pr: u64, web: bool) -> Result<Option<String>> {
+        let slug = self.slug()?.to_string();
+        let num = pr.to_string();
+        if web {
+            // `gh pr view --web` resolves the right host (incl. Enterprise) and opens the browser,
+            // printing its own "Opening …" line.
+            self.run(&["pr", "view", &num, "-R", &slug, "--web"]).await?;
+            Ok(None)
+        } else {
+            let url = self
+                .run(&["pr", "view", &num, "-R", &slug, "--json", "url", "--jq", ".url"])
+                .await?;
+            Ok(Some(url.trim().to_string()))
+        }
+    }
+
     async fn find_comment(&self, pr: u64, marker: &str) -> Result<Option<u64>> {
         let slug = self.slug()?.to_string();
         // PR comments are issue comments. Page through and pick the first carrying our marker.

@@ -25,6 +25,10 @@ pub trait Forge: Send + Sync {
     async fn update_pr(&self, pr: u64, base: Option<&str>) -> Result<()>;
     async fn is_merged(&self, pr: u64) -> Result<bool>;
 
+    /// View a PR. With `web`, open it in the user's browser and return `None`; otherwise return its
+    /// canonical URL (so callers can print it without launching a browser).
+    async fn view_pr(&self, pr: u64, web: bool) -> Result<Option<String>>;
+
     /// Id of the first comment on `pr` whose body contains `marker`, if any. Used to upsert the
     /// stack-navigation comment idempotently.
     async fn find_comment(&self, pr: u64, marker: &str) -> Result<Option<u64>>;

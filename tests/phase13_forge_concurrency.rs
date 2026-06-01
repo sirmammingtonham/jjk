@@ -59,6 +59,10 @@ impl Forge for ReorderForge {
         self.stagger().await;
         self.inner.is_merged(pr).await
     }
+    async fn view_pr(&self, pr: u64, web: bool) -> Result<Option<String>> {
+        self.stagger().await;
+        self.inner.view_pr(pr, web).await
+    }
     async fn find_comment(&self, pr: u64, marker: &str) -> Result<Option<u64>> {
         self.stagger().await;
         self.inner.find_comment(pr, marker).await

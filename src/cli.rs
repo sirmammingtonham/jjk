@@ -74,6 +74,9 @@ pub enum Command {
     Pull,
     /// Push the current branch.
     Push,
+    /// Inspect the current branch's pull request.
+    #[command(subcommand)]
+    Pr(PrCmd),
     /// Create/update PRs for the whole stack (bottom-up, correctly based).
     Submit(SubmitArgs),
     /// Submit the current branch and everything above it.
@@ -181,6 +184,19 @@ pub struct BranchSplitArgs {
     pub name: String,
     /// The commit to split at (its commits and below go to the new branch); must be below the tip.
     pub at: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PrCmd {
+    /// Open the current branch's PR in the browser (`--print` to emit the URL instead).
+    View(PrViewArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct PrViewArgs {
+    /// Print the PR URL instead of opening a browser (for scripts / headless use).
+    #[arg(short, long)]
+    pub print: bool,
 }
 
 #[derive(Subcommand, Debug)]
