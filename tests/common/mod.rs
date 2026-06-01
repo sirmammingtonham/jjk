@@ -84,6 +84,9 @@ struct FakeState {
     bodies: std::collections::HashMap<String, String>,
     /// Draft flag captured at create time, per head.
     drafts: std::collections::HashMap<String, bool>,
+    /// Ordered log of mutating ops (e.g. "create_pr:feat-a", "create_comment:1"), for asserting
+    /// the order in which submit opens PRs vs posts their nav comments.
+    events: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -138,6 +141,11 @@ impl FakeForge {
     /// Whether the PR for a branch was created as a draft.
     pub fn draft_for(&self, branch: &str) -> Option<bool> {
         self.inner.lock().unwrap().drafts.get(branch).copied()
+    }
+
+    /// Ordered log of mutating forge ops (for asserting submit's open-vs-comment timing).
+    pub fn events(&self) -> Vec<String> {
+        self.inner.lock().unwrap().events.clone()
     }
 
     /// Simulate the author editing a PR's description (so tests can assert jjk leaves it alone).
@@ -211,6 +219,7 @@ impl Forge for FakeForge {
         }
         st.bodies.insert(head.to_string(), body.to_string());
         st.drafts.insert(head.to_string(), draft);
+        st.events.push(format!("create_pr:{head}"));
         let number = st.next;
         st.next += 1;
         let pr = PrRef {
@@ -259,6 +268,7 @@ impl Forge for FakeForge {
         let mut st = self.inner.lock().unwrap();
         let id = st.next_comment;
         st.next_comment += 1;
+        st.events.push(format!("create_comment:{pr}"));
         st.comments.push(FakeComment {
             id,
             pr,

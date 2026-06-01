@@ -1287,9 +1287,17 @@ impl Engine {
                 .await?
         };
 
-        // Push + create/update the in-scope branches. The push (a jj op) and the create/update stay
-        // sequential: pushes can't run concurrently (one jj op/repo) and create needs its base ref
-        // pushed first; the prompt for a new PR is interactive (one at a time).
+        // Push + create/update the in-scope branches bottom→top. The push (a jj op) and the
+        // create/update stay sequential: pushes can't run concurrently (one jj op/repo) and create
+        // needs its base ref pushed first; the prompt for a new PR is interactive (one at a time).
+        //
+        // git-spice-style comment timing: right after each PR opens we (re)post the stack-navigation
+        // comment on every PR known so far. So a freshly-opened PR gets its nav comment immediately
+        // — making it likely the *first* comment, before CI bots chime in — and the already-opened
+        // PRs grow to include it. `comment_ids` caches the comment id per PR across iterations so
+        // later passes update in place (skipping the `find_comment` lookup) instead of re-searching.
+        let mut comment_ids: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        let mut nav_count = 0usize;
         for (slot, &i) in to_submit.iter().enumerate() {
             let item = &plan[i];
             self.vcs.push(&remote, &item.name, PushOpts::default())?;
@@ -1325,21 +1333,23 @@ impl Engine {
                 }
             };
             self.state.branch_mut(&item.name).pr = Some(number);
-        }
-        self.state.save(&self.root)?;
+            self.state.save(&self.root)?;
 
-        // Upsert the stack-navigation comment across the whole stack (all tracked branches that now
-        // have a PR), so it stays accurate even after a subset submit.
-        let stack_prs: Vec<(String, u64)> = plan
-            .iter()
-            .filter_map(|i| self.state.pr_of(&i.name).map(|pr| (i.name.clone(), pr)))
-            .collect();
-        let n = self
-            .upsert_nav_comments(&stack_prs, yuji, &std::collections::HashMap::new())
-            .await?
-            .len();
-        if n > 0 {
-            report.note(format!("updated stack navigation on {n} PRs"));
+            // (Re)post the nav comment across every PR opened so far (whole known stack in order).
+            let stack_prs: Vec<(String, u64)> = plan
+                .iter()
+                .filter_map(|it| self.state.pr_of(&it.name).map(|pr| (it.name.clone(), pr)))
+                .collect();
+            let touched = self.upsert_nav_comments(&stack_prs, yuji, &comment_ids).await?;
+            if !touched.is_empty() {
+                nav_count = touched.len();
+                for (pr, cid) in touched {
+                    comment_ids.insert(pr, cid);
+                }
+            }
+        }
+        if nav_count > 0 {
+            report.note(format!("updated stack navigation on {nav_count} PRs"));
         }
         Ok(report)
     }
