@@ -7,23 +7,23 @@ mod common;
 use common::{setup_with_remote, write, FakeForge, SharedForge};
 use std::sync::Arc;
 
-fn build_three_branch_stack(h: &mut common::RepoWithRemote) {
+async fn build_three_branch_stack(h: &mut common::RepoWithRemote) {
     let root = h.repo.path().to_path_buf();
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "a\n");
-    h.engine.commit("feat-a: first").unwrap();
-    h.engine.branch_create("feat-b", true).unwrap();
+    h.engine.commit("feat-a: first").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
     write(&root, "b.txt", "b\n");
-    h.engine.commit("feat-b: first").unwrap();
-    h.engine.branch_create("feat-c", true).unwrap();
+    h.engine.commit("feat-b: first").await.unwrap();
+    h.engine.branch_create("feat-c", true).await.unwrap();
     write(&root, "c.txt", "c\n");
-    h.engine.commit("feat-c: first").unwrap();
+    h.engine.commit("feat-c: first").await.unwrap();
 }
 
 #[tokio::test]
 async fn submit_creates_three_correctly_based_prs_and_is_idempotent() {
-    let mut h = setup_with_remote();
-    build_three_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    build_three_branch_stack(&mut h).await;
 
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
@@ -39,7 +39,7 @@ async fn submit_creates_three_correctly_based_prs_and_is_idempotent() {
 
     // Edit + re-submit: updates in place, no duplicates (FakeForge::create_pr panics on dup head).
     write(h.repo.path(), "a.txt", "a\nedited\n");
-    h.engine.commit("feat-a: more").unwrap();
+    h.engine.commit("feat-a: more").await.unwrap();
     h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
 
     assert_eq!(fake.count(), 3, "no duplicate PRs on re-submit");
@@ -49,8 +49,8 @@ async fn submit_creates_three_correctly_based_prs_and_is_idempotent() {
 
 #[tokio::test]
 async fn submit_records_pr_numbers_in_state() {
-    let mut h = setup_with_remote();
-    build_three_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    build_three_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
@@ -65,15 +65,15 @@ async fn submit_records_pr_numbers_in_state() {
 
 #[tokio::test]
 async fn submit_skips_untracked_branches() {
-    let mut h = setup_with_remote();
+    let mut h = setup_with_remote().await;
     let root = h.repo.path().to_path_buf();
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "a\n");
-    h.engine.commit("a").unwrap();
+    h.engine.commit("a").await.unwrap();
     // Untracked branch on top.
-    h.engine.branch_create("scratch", /*tracked=*/ false).unwrap();
+    h.engine.branch_create("scratch", /*tracked=*/ false).await.unwrap();
     write(&root, "s.txt", "s\n");
-    h.engine.commit("s").unwrap();
+    h.engine.commit("s").await.unwrap();
 
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
@@ -86,8 +86,8 @@ async fn submit_skips_untracked_branches() {
 
 #[tokio::test]
 async fn submit_posts_idempotent_navigation_comments() {
-    let mut h = setup_with_remote();
-    build_three_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    build_three_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
@@ -129,8 +129,8 @@ async fn submit_posts_idempotent_navigation_comments() {
 #[tokio::test]
 async fn granular_submit_scopes() {
     use jjk::engine::SubmitScope;
-    let mut h = setup_with_remote();
-    build_three_branch_stack(&mut h); // feat-a, feat-b, feat-c (currently on feat-c)
+    let mut h = setup_with_remote().await;
+    build_three_branch_stack(&mut h).await; // feat-a, feat-b, feat-c (currently on feat-c)
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
@@ -155,14 +155,14 @@ async fn granular_submit_scopes() {
 #[tokio::test]
 async fn upstack_submit_only_current_and_above() {
     use jjk::engine::{NavDir, SubmitScope};
-    let mut h = setup_with_remote();
-    build_three_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    build_three_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
     // Move to feat-b, then upstack submit → feat-b + feat-c (not feat-a).
-    h.engine.navigate(NavDir::Down).unwrap(); // feat-c -> feat-b
-    assert_eq!(h.engine.current_branch().unwrap().as_deref(), Some("feat-b"));
+    h.engine.navigate(NavDir::Down).await.unwrap(); // feat-c -> feat-b
+    assert_eq!(h.engine.current_branch().await.unwrap().as_deref(), Some("feat-b"));
     h.engine.submit(SubmitScope::Upstack).await.unwrap();
     assert_eq!(fake.count(), 2, "feat-b and feat-c only");
     assert!(fake.pr_for("feat-b").is_some());

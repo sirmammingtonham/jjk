@@ -64,9 +64,9 @@ async fn live_submit_three_pr_stack_and_reconcile() {
     let c = format!("smk-{ts}-c");
 
     let tmp = tempfile::tempdir().unwrap();
-    Engine::repo_init(tmp.path(), Some("main".into()), Some("origin".into())).unwrap();
+    Engine::repo_init(tmp.path(), Some("main".into()), Some("origin".into())).await.unwrap();
     let mut engine = Engine::open(tmp.path()).unwrap();
-    engine.vcs().add_remote("origin", &authed).unwrap();
+    engine.vcs().add_remote("origin", &authed).await.unwrap();
     // Remote was added after open(), so refresh the forge with the now-known slug.
     engine.set_forge(Box::new(GhCli::new(Some(slug()))));
 
@@ -94,16 +94,17 @@ async fn run_body(
 ) -> anyhow::Result<()> {
     // Ensure `main` exists (PR bases need it). Reuse the remote's main if a prior run created it,
     // else seed and push it.
-    engine.vcs().fetch("origin", None).ok();
+    engine.vcs().fetch("origin", None).await.ok();
     let remote_main = engine
         .vcs()
         .resolve("main@origin")
+        .await
         .ok()
         .and_then(|v| v.into_iter().next());
     match remote_main {
         Some(c) => {
             // Make sure a local `main` bookmark points at the fetched trunk.
-            if !engine.vcs().bookmarks()?.iter().any(|b| b.name == "main") {
+            if !engine.vcs().bookmarks().await?.iter().any(|b| b.name == "main") {
                 let id = c.change_id.clone();
                 engine
                     .vcs()
@@ -117,21 +118,21 @@ async fn run_body(
                 tx.create_bookmark("main", &id)?;
                 Ok(())
             })?;
-            engine.vcs().push("origin", "main", PushOpts::default())?;
+            engine.vcs().push("origin", "main", PushOpts::default()).await?;
         }
     }
 
     // Build a 3-branch stack on top of main.
-    engine.checkout("main")?;
-    engine.branch_create(a, true)?;
+    engine.checkout("main").await?;
+    engine.branch_create(a, true).await?;
     write(root, "a.txt", "alpha\n");
-    engine.commit(&format!("{a}: alpha"))?;
-    engine.branch_create(b, true)?;
+    engine.commit(&format!("{a}: alpha")).await?;
+    engine.branch_create(b, true).await?;
     write(root, "b.txt", "bravo\n");
-    engine.commit(&format!("{b}: bravo"))?;
-    engine.branch_create(c, true)?;
+    engine.commit(&format!("{b}: bravo")).await?;
+    engine.branch_create(c, true).await?;
     write(root, "c.txt", "charlie\n");
-    engine.commit(&format!("{c}: charlie"))?;
+    engine.commit(&format!("{c}: charlie")).await?;
 
     // Submit: 3 PRs, based bottom-up.
     let r1 = engine.submit(jjk::engine::SubmitScope::Stack).await?;
@@ -148,7 +149,7 @@ async fn run_body(
 
     // Edit + re-submit: idempotent (no new PRs, same numbers, bases intact).
     write(root, "a.txt", "alpha edited\n");
-    engine.commit(&format!("{a}: edit"))?;
+    engine.commit(&format!("{a}: edit")).await?;
     let r2 = engine.submit(jjk::engine::SubmitScope::Stack).await?;
     eprintln!("submit #2:\n{}", r2.notes.join("\n"));
 

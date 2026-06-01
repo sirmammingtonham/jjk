@@ -84,7 +84,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
 
     match command {
         Command::Repo(RepoCmd::Init(args)) => {
-            let report = Engine::repo_init(&cwd, args.trunk, args.remote)?;
+            let report = Engine::repo_init(&cwd, args.trunk, args.remote).await?;
             render::print_report(&report);
             Ok(ExitCode::SUCCESS)
         }
@@ -106,8 +106,8 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
 
     // Follow a plain `git checkout`: if git HEAD moved out from under jj, reconcile so position
     // tracking is correct (jjk's fast reads skip jj's HEAD import). Surface where we landed.
-    if engine.reconcile_git_head()? {
-        let here = engine.current_branch()?.unwrap_or_else(|| "trunk".to_string());
+    if engine.reconcile_git_head().await? {
+        let here = engine.current_branch().await?.unwrap_or_else(|| "trunk".to_string());
         eprintln!("note: followed git HEAD (now on {here})");
     }
 
@@ -115,7 +115,7 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
     // `jj op restore` past *all* the jj operations the command performs (not just the last).
     // Best-effort — never block the real command if the checkpoint can't be written.
     if mutates(&command) {
-        let _ = engine.checkpoint();
+        let _ = engine.checkpoint().await;
     }
 
     match command {
@@ -129,19 +129,19 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
 
             let report = if let Some(target) = args.fixup.as_deref() {
                 if !args.no_verify {
-                    engine.run_pre_commit(&CommitScope::All)?;
+                    engine.run_pre_commit(&CommitScope::All).await?;
                 }
-                engine.commit_fixup(target)?
+                engine.commit_fixup(target).await?
             } else if args.split {
                 // Restructuring (no new content) — no hook.
-                engine.commit_split()?
+                engine.commit_split().await?
             } else if let Some(rev) = args.pick.as_deref() {
-                engine.commit_pick(rev)?
+                engine.commit_pick(rev).await?
             } else if args.amend {
                 if !args.no_verify {
-                    engine.run_pre_commit(&CommitScope::All)?;
+                    engine.run_pre_commit(&CommitScope::All).await?;
                 }
-                engine.commit_amend(args.message.as_deref())?
+                engine.commit_amend(args.message.as_deref()).await?
             } else {
                 // Resolve what to commit: -i wins, then explicit paths, then git-staged files,
                 // else the whole working copy.
@@ -153,7 +153,7 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
                         args.paths.iter().map(|p| to_root_relative(cwd, &root, p)).collect(),
                     )
                 } else {
-                    let staged = engine.staged_paths()?;
+                    let staged = engine.staged_paths().await?;
                     if staged.is_empty() {
                         CommitScope::All
                     } else {
@@ -161,7 +161,7 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
                     }
                 };
                 if !args.no_verify {
-                    engine.run_pre_commit(&scope)?;
+                    engine.run_pre_commit(&scope).await?;
                 }
                 let msg = args
                     .message
@@ -175,7 +175,7 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
                         );
                     }
                 }
-                engine.commit_scoped(&msg, &scope)?
+                engine.commit_scoped(&msg, &scope).await?
             };
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
@@ -183,48 +183,48 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
 
         Command::Checkout(args) => {
             let report = if args.create {
-                engine.branch_create(&args.name, /*tracked=*/ false)?
+                engine.branch_create(&args.name, /*tracked=*/ false).await?
             } else {
-                engine.checkout(&args.name)?
+                engine.checkout(&args.name).await?
             };
             render::print_report(&report);
         }
 
         Command::Branch(BranchCmd::Create(arg)) => {
-            let report = engine.branch_create(&arg.name, /*tracked=*/ true)?;
+            let report = engine.branch_create(&arg.name, /*tracked=*/ true).await?;
             render::print_report(&report);
         }
         Command::Branch(BranchCmd::Delete(arg)) => {
-            let report = engine.branch_delete(&arg.name)?;
+            let report = engine.branch_delete(&arg.name).await?;
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
         }
         Command::Branch(BranchCmd::Onto(arg)) => {
-            let report = engine.branch_onto(&arg.name)?;
+            let report = engine.branch_onto(&arg.name).await?;
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
         }
         Command::Branch(BranchCmd::Rename(args)) => {
             let report = match args.names.as_slice() {
-                [new] => engine.branch_rename(None, new)?,
-                [old, new] => engine.branch_rename(Some(old), new)?,
+                [new] => engine.branch_rename(None, new).await?,
+                [old, new] => engine.branch_rename(Some(old), new).await?,
                 _ => anyhow::bail!("rename takes <new> or <old> <new>"),
             };
             render::print_report(&report);
         }
         Command::Branch(BranchCmd::Diff) => {
-            print!("{}", engine.branch_diff()?);
+            print!("{}", engine.branch_diff().await?);
         }
         Command::Branch(BranchCmd::Squash(args)) => {
-            let report = engine.branch_squash(args.message.as_deref())?;
+            let report = engine.branch_squash(args.message.as_deref()).await?;
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
         }
         Command::Branch(BranchCmd::Fold) => {
-            render::print_report(&engine.branch_fold()?);
+            render::print_report(&engine.branch_fold().await?);
         }
         Command::Branch(BranchCmd::Split(args)) => {
-            render::print_report(&engine.branch_split(&args.name, &args.at)?);
+            render::print_report(&engine.branch_split(&args.name, &args.at).await?);
         }
         Command::Branch(BranchCmd::Submit(args)) => {
             let opts = prepare_submit(&mut engine, &args);
@@ -239,21 +239,21 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             render::print_report(&engine.submit_with(SubmitScope::Downstack, opts).await?);
         }
         Command::Track(arg) => {
-            render::print_report(&engine.set_tracked(arg.name.as_deref(), true)?);
+            render::print_report(&engine.set_tracked(arg.name.as_deref(), true).await?);
         }
         Command::Untrack(arg) => {
-            render::print_report(&engine.set_tracked(arg.name.as_deref(), false)?);
+            render::print_report(&engine.set_tracked(arg.name.as_deref(), false).await?);
         }
         Command::Restack => {
-            let report = engine.restack()?;
+            let report = engine.restack().await?;
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
         }
 
         Command::Status => {
             // One snapshotting read of @ (detects uncommitted edits); the rest are non-snapshotting.
-            let wc = engine.vcs().snapshot()?;
-            let stack = engine.derive_stack()?;
+            let wc = engine.vcs().snapshot().await?;
+            let stack = engine.derive_stack().await?;
             println!("{}", render::render_position(&stack));
             if wc.is_empty {
                 println!("working copy is clean (empty @)");
@@ -267,56 +267,58 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             }
         }
         Command::Ls => {
-            let stack = engine.derive_stack()?;
+            let stack = engine.derive_stack().await?;
             print!("{}", render::render_ls(&stack));
         }
         Command::Ll => {
-            let stack = engine.derive_stack()?;
+            let stack = engine.derive_stack().await?;
             print!("{}", render::render_ll(&stack));
         }
 
-        Command::Up => render::print_report(&engine.navigate(NavDir::Up)?),
-        Command::Down => render::print_report(&engine.navigate(NavDir::Down)?),
-        Command::Top => render::print_report(&engine.navigate(NavDir::Top)?),
-        Command::Bottom => render::print_report(&engine.navigate(NavDir::Bottom)?),
-        Command::Trunk => render::print_report(&engine.trunk_checkout()?),
+        Command::Up => render::print_report(&engine.navigate(NavDir::Up).await?),
+        Command::Down => render::print_report(&engine.navigate(NavDir::Down).await?),
+        Command::Top => render::print_report(&engine.navigate(NavDir::Top).await?),
+        Command::Bottom => render::print_report(&engine.navigate(NavDir::Bottom).await?),
+        Command::Trunk => render::print_report(&engine.trunk_checkout().await?),
 
-        Command::Undo => render::print_report(&engine.undo()?),
+        Command::Undo => render::print_report(&engine.undo().await?),
 
         Command::Worktree(WorktreeCmd::Add(args)) => {
-            let report = engine.worktree_add(
-                std::path::Path::new(&args.path),
-                args.name.as_deref(),
-                args.branch.as_deref(),
-            )?;
+            let report = engine
+                .worktree_add(
+                    std::path::Path::new(&args.path),
+                    args.name.as_deref(),
+                    args.branch.as_deref(),
+                )
+                .await?;
             render::print_report(&report);
         }
         Command::Worktree(WorktreeCmd::List) => {
-            let rows = engine.worktree_list()?;
+            let rows = engine.worktree_list().await?;
             print!("{}", render::render_worktrees(&rows));
         }
         Command::Worktree(WorktreeCmd::Remove(arg)) => {
-            render::print_report(&engine.worktree_remove(&arg.name)?);
+            render::print_report(&engine.worktree_remove(&arg.name).await?);
         }
 
         Command::Stash(args) => {
             let report = match args.action {
-                Some(StashAction::Pop) => engine.stash_pop()?,
-                None => engine.stash()?,
+                Some(StashAction::Pop) => engine.stash_pop().await?,
+                None => engine.stash().await?,
             };
             render::print_report(&report);
         }
 
         Command::Resolve => {
-            let report = engine.resolve()?;
+            let report = engine.resolve().await?;
             render::print_report(&report);
         }
 
-        Command::Fetch => render::print_report(&engine.fetch()?),
-        Command::Push => render::print_report(&engine.push_current()?),
+        Command::Fetch => render::print_report(&engine.fetch().await?),
+        Command::Push => render::print_report(&engine.push_current().await?),
 
         Command::Pull => {
-            let report = engine.pull()?;
+            let report = engine.pull().await?;
             conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
         }
@@ -343,7 +345,7 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
 
     // Keep plain git in sync: re-attach git HEAD to the branch jjk is now on (jj detaches it when
     // it moves @). Best-effort — never fail a command over this.
-    let _ = engine.sync_git_head_to_current();
+    let _ = engine.sync_git_head_to_current().await;
 
     Ok(if conflicts {
         // Conflicts are reported, not fatal (ARCH D4); use a distinct nonzero code.

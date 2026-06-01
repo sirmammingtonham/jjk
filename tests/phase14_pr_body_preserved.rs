@@ -8,20 +8,20 @@ use common::{setup_with_remote, write, FakeForge, RepoWithRemote, SharedForge};
 use jjk::engine::SubmitScope;
 use std::sync::Arc;
 
-fn two_branch_stack(h: &mut RepoWithRemote) {
+async fn two_branch_stack(h: &mut RepoWithRemote) {
     let root = h.repo.path().to_path_buf();
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "a\n");
-    h.engine.commit("feat-a: first").unwrap();
-    h.engine.branch_create("feat-b", true).unwrap();
+    h.engine.commit("feat-a: first").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
     write(&root, "b.txt", "b\n");
-    h.engine.commit("feat-b: first").unwrap();
+    h.engine.commit("feat-b: first").await.unwrap();
 }
 
 #[tokio::test]
 async fn resubmit_does_not_overwrite_an_edited_pr_body() {
-    let mut h = setup_with_remote();
-    two_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    two_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
@@ -33,7 +33,7 @@ async fn resubmit_does_not_overwrite_an_edited_pr_body() {
 
     // Add a commit and re-submit the whole stack (this retargets/updates existing PRs).
     write(h.repo.path(), "a.txt", "a\nmore\n");
-    h.engine.commit("feat-a: more").unwrap();
+    h.engine.commit("feat-a: more").await.unwrap();
     h.engine.submit(SubmitScope::Stack).await.unwrap();
 
     assert_eq!(
@@ -45,8 +45,8 @@ async fn resubmit_does_not_overwrite_an_edited_pr_body() {
 
 #[tokio::test]
 async fn sync_does_not_overwrite_an_edited_pr_body() {
-    let mut h = setup_with_remote();
-    two_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    two_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
     h.engine.submit(SubmitScope::Stack).await.unwrap();

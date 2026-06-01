@@ -11,35 +11,35 @@ use common::{init_identity, write};
 use jjk::engine::Engine;
 use tempfile::TempDir;
 
-fn setup() -> (TempDir, Engine) {
+async fn setup() -> (TempDir, Engine) {
     init_identity();
     let tmp = tempfile::tempdir().unwrap();
-    Engine::repo_init(tmp.path(), Some("main".into()), Some("origin".into())).unwrap();
+    Engine::repo_init(tmp.path(), Some("main".into()), Some("origin".into())).await.unwrap();
     let engine = Engine::open(tmp.path()).unwrap();
     (tmp, engine)
 }
 
-#[test]
-fn undo_after_commit_does_not_leave_a_duplicate() {
-    let (tmp, mut e) = setup();
+#[tokio::test]
+async fn undo_after_commit_does_not_leave_a_duplicate() {
+    let (tmp, mut e) = setup().await;
     let root = tmp.path().to_path_buf();
 
     // A tracked branch with one commit (the user's starting point).
-    e.branch_create("feat", true).unwrap();
+    e.branch_create("feat", true).await.unwrap();
     write(&root, "a.txt", "first\n");
-    e.commit("add first thing").unwrap();
-    assert_eq!(e.derive_stack().unwrap().branch("feat").unwrap().commit_count(), 1);
+    e.commit("add first thing").await.unwrap();
+    assert_eq!(e.derive_stack().await.unwrap().branch("feat").unwrap().commit_count(), 1);
 
     // Make a change and commit — but this is the command we'll undo (mimics dispatcher: checkpoint
     // first, then run the command).
     write(&root, "a.txt", "first\nsecond\n");
-    e.checkpoint().unwrap();
-    e.commit("better error handling").unwrap();
-    assert_eq!(e.derive_stack().unwrap().branch("feat").unwrap().commit_count(), 2);
+    e.checkpoint().await.unwrap();
+    e.commit("better error handling").await.unwrap();
+    assert_eq!(e.derive_stack().await.unwrap().branch("feat").unwrap().commit_count(), 2);
 
     // Undo should fully revert the commit, not just move the bookmark.
-    e.undo().unwrap();
-    let stack = e.derive_stack().unwrap();
+    e.undo().await.unwrap();
+    let stack = e.derive_stack().await.unwrap();
     assert_eq!(
         stack.branch("feat").unwrap().commit_count(),
         1,
@@ -50,9 +50,9 @@ fn undo_after_commit_does_not_leave_a_duplicate() {
     // the regression we guard is structural: there must be exactly ONE new commit on top of the
     // base, not the original commit lingering alongside the redo.
     write(&root, "a.txt", "first\nsecond redone\n");
-    e.checkpoint().unwrap();
-    e.commit("better error handling").unwrap();
-    let stack = e.derive_stack().unwrap();
+    e.checkpoint().await.unwrap();
+    e.commit("better error handling").await.unwrap();
+    let stack = e.derive_stack().await.unwrap();
     assert_eq!(
         stack.branch("feat").unwrap().commit_count(),
         2,
@@ -60,57 +60,57 @@ fn undo_after_commit_does_not_leave_a_duplicate() {
     );
 }
 
-#[test]
-fn undo_restores_uncommitted_changes_to_working_copy() {
-    let (tmp, mut e) = setup();
+#[tokio::test]
+async fn undo_restores_uncommitted_changes_to_working_copy() {
+    let (tmp, mut e) = setup().await;
     let root = tmp.path().to_path_buf();
 
-    e.branch_create("feat", true).unwrap();
+    e.branch_create("feat", true).await.unwrap();
     write(&root, "a.txt", "v1\n");
-    e.commit("c1").unwrap();
+    e.commit("c1").await.unwrap();
 
     // Edit, then commit-then-undo: the edit should come back as an uncommitted change in `@`.
     write(&root, "a.txt", "v1\nv2\n");
-    e.checkpoint().unwrap();
-    e.commit("c2").unwrap();
-    e.undo().unwrap();
+    e.checkpoint().await.unwrap();
+    e.commit("c2").await.unwrap();
+    e.undo().await.unwrap();
 
-    assert!(!e.vcs().snapshot().unwrap().is_empty, "edits return to the working copy after undo");
-    assert_eq!(e.derive_stack().unwrap().branch("feat").unwrap().commit_count(), 1);
+    assert!(!e.vcs().snapshot().await.unwrap().is_empty, "edits return to the working copy after undo");
+    assert_eq!(e.derive_stack().await.unwrap().branch("feat").unwrap().commit_count(), 1);
 }
 
-#[test]
-fn undo_walks_back_multiple_commands() {
-    let (tmp, mut e) = setup();
+#[tokio::test]
+async fn undo_walks_back_multiple_commands() {
+    let (tmp, mut e) = setup().await;
     let root = tmp.path().to_path_buf();
 
-    e.branch_create("feat", true).unwrap();
+    e.branch_create("feat", true).await.unwrap();
     // Each command mirrors the dispatcher: edit, checkpoint (snapshots the edit), then commit.
     write(&root, "a.txt", "base\n");
-    e.checkpoint().unwrap();
-    e.commit("base").unwrap();
+    e.checkpoint().await.unwrap();
+    e.commit("base").await.unwrap();
     write(&root, "a.txt", "base\ntwo\n");
-    e.checkpoint().unwrap();
-    e.commit("two").unwrap();
+    e.checkpoint().await.unwrap();
+    e.commit("two").await.unwrap();
     write(&root, "a.txt", "base\ntwo\nthree\n");
-    e.checkpoint().unwrap();
-    e.commit("three").unwrap();
-    assert_eq!(e.derive_stack().unwrap().branch("feat").unwrap().commit_count(), 3);
+    e.checkpoint().await.unwrap();
+    e.commit("three").await.unwrap();
+    assert_eq!(e.derive_stack().await.unwrap().branch("feat").unwrap().commit_count(), 3);
 
-    e.undo().unwrap(); // undo "three"
-    assert_eq!(e.derive_stack().unwrap().branch("feat").unwrap().commit_count(), 2);
-    e.undo().unwrap(); // undo "two"
-    assert_eq!(e.derive_stack().unwrap().branch("feat").unwrap().commit_count(), 1);
+    e.undo().await.unwrap(); // undo "three"
+    assert_eq!(e.derive_stack().await.unwrap().branch("feat").unwrap().commit_count(), 2);
+    e.undo().await.unwrap(); // undo "two"
+    assert_eq!(e.derive_stack().await.unwrap().branch("feat").unwrap().commit_count(), 1);
 }
 
-#[test]
-fn undo_with_no_checkpoint_falls_back_to_jj_undo() {
-    let (tmp, mut e) = setup();
+#[tokio::test]
+async fn undo_with_no_checkpoint_falls_back_to_jj_undo() {
+    let (tmp, mut e) = setup().await;
     let root = tmp.path().to_path_buf();
-    e.branch_create("feat", true).unwrap();
+    e.branch_create("feat", true).await.unwrap();
     write(&root, "a.txt", "1\n");
-    e.commit("one").unwrap();
+    e.commit("one").await.unwrap();
 
     // No checkpoint recorded for this commit; undo falls back to a single `jj undo` and still runs.
-    assert!(e.undo().is_ok(), "undo without a checkpoint falls back cleanly");
+    assert!(e.undo().await.is_ok(), "undo without a checkpoint falls back cleanly");
 }

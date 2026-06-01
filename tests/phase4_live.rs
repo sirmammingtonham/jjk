@@ -55,9 +55,9 @@ async fn live_sync_after_squash_merge() {
     let b = format!("sync-{ts}-b");
 
     let tmp = tempfile::tempdir().unwrap();
-    Engine::repo_init(tmp.path(), Some("main".into()), Some("origin".into())).unwrap();
+    Engine::repo_init(tmp.path(), Some("main".into()), Some("origin".into())).await.unwrap();
     let mut engine = Engine::open(tmp.path()).unwrap();
-    engine.vcs().add_remote("origin", &authed).unwrap();
+    engine.vcs().add_remote("origin", &authed).await.unwrap();
     engine.set_forge(Box::new(GhCli::new(Some(SLUG.to_string()))));
 
     let result = run_body(&mut engine, tmp.path(), &a, &b).await;
@@ -75,10 +75,11 @@ async fn live_sync_after_squash_merge() {
 
 async fn run_body(engine: &mut Engine, root: &Path, a: &str, b: &str) -> anyhow::Result<()> {
     // Ensure main exists (reuse if a prior run seeded it).
-    engine.vcs().fetch("origin", None).ok();
+    engine.vcs().fetch("origin", None).await.ok();
     let has_main = engine
         .vcs()
         .resolve("main@origin")
+        .await
         .ok()
         .map(|v| !v.is_empty())
         .unwrap_or(false);
@@ -89,20 +90,20 @@ async fn run_body(engine: &mut Engine, root: &Path, a: &str, b: &str) -> anyhow:
             tx.create_bookmark("main", &id)?;
             Ok(())
         })?;
-        engine.vcs().push("origin", "main", PushOpts::default())?;
-    } else if !engine.vcs().bookmarks()?.iter().any(|bm| bm.name == "main") {
-        let id = engine.vcs().resolve("main@origin")?[0].change_id.clone();
+        engine.vcs().push("origin", "main", PushOpts::default()).await?;
+    } else if !engine.vcs().bookmarks().await?.iter().any(|bm| bm.name == "main") {
+        let id = engine.vcs().resolve("main@origin").await?[0].change_id.clone();
         engine.vcs().transaction(&mut |tx| tx.set_bookmark("main", &id))?;
     }
 
     // Two-branch stack.
-    engine.checkout("main")?;
-    engine.branch_create(a, true)?;
+    engine.checkout("main").await?;
+    engine.branch_create(a, true).await?;
     write(root, &format!("{a}.txt"), "alpha\n");
-    engine.commit(&format!("{a}: alpha"))?;
-    engine.branch_create(b, true)?;
+    engine.commit(&format!("{a}: alpha")).await?;
+    engine.branch_create(b, true).await?;
     write(root, &format!("{b}.txt"), "bravo\n");
-    engine.commit(&format!("{b}: bravo"))?;
+    engine.commit(&format!("{b}: bravo")).await?;
 
     engine.submit(jjk::engine::SubmitScope::Stack).await?;
     let gh = GhCli::new(Some(SLUG.to_string()));
@@ -135,7 +136,7 @@ async fn run_body(engine: &mut Engine, root: &Path, a: &str, b: &str) -> anyhow:
     anyhow::ensure!(report.conflicts.is_empty(), "unexpected conflicts: {:?}", report.conflicts);
 
     // feat-a gone locally; feat-b survives on trunk.
-    let stack = engine.derive_stack()?;
+    let stack = engine.derive_stack().await?;
     let names: Vec<_> = stack.branches.iter().map(|b| b.name.clone()).collect();
     anyhow::ensure!(names == vec![b.to_string()], "expected only {b}, got {names:?}");
 

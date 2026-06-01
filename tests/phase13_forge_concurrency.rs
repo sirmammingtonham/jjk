@@ -77,23 +77,23 @@ impl Forge for ReorderForge {
     }
 }
 
-fn three_branch_stack(h: &mut common::RepoWithRemote) {
+async fn three_branch_stack(h: &mut common::RepoWithRemote) {
     let root = h.repo.path().to_path_buf();
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "a\n");
-    h.engine.commit("feat-a: first").unwrap();
-    h.engine.branch_create("feat-b", true).unwrap();
+    h.engine.commit("feat-a: first").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
     write(&root, "b.txt", "b\n");
-    h.engine.commit("feat-b: first").unwrap();
-    h.engine.branch_create("feat-c", true).unwrap();
+    h.engine.commit("feat-b: first").await.unwrap();
+    h.engine.branch_create("feat-c", true).await.unwrap();
     write(&root, "c.txt", "c\n");
-    h.engine.commit("feat-c: first").unwrap();
+    h.engine.commit("feat-c: first").await.unwrap();
 }
 
 #[tokio::test]
 async fn submit_maps_results_correctly_under_out_of_order_completion() {
-    let mut h = setup_with_remote();
-    three_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    three_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(ReorderForge::new(fake.clone())));
 
@@ -122,8 +122,8 @@ async fn submit_maps_results_correctly_under_out_of_order_completion() {
 
 #[tokio::test]
 async fn sync_merged_detection_maps_correctly_under_out_of_order_completion() {
-    let mut h = setup_with_remote();
-    three_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    three_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(ReorderForge::new(fake.clone())));
     h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();

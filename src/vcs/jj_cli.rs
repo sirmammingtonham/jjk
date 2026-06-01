@@ -8,8 +8,10 @@ use crate::model::{
 };
 use crate::vcs::{CommitScope, PushOpts, Vcs, VcsTx};
 use anyhow::{anyhow, Context};
+use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tokio::process::Command as AsyncCommand;
 
 /// The jj minor version jjk is developed against (the `41` in `0.41.x`). jj is pre-1.0, so its CLI
 /// can change between minor releases; patch releases are treated as compatible.
@@ -93,13 +95,34 @@ impl JjCli {
         Ok(Self::new(dir))
     }
 
-    /// Run a `jj` command in this repo, returning stdout. On failure, surface jj's real stderr.
-    fn run(&self, args: &[&str]) -> Result<String> {
+    /// Run a `jj` command in this repo (blocking), returning stdout. On failure, surface jj's real
+    /// stderr. Used by the synchronous mutation path ([`JjTx`]); reads use [`run_async`].
+    fn run_blocking(&self, args: &[&str]) -> Result<String> {
         let out = Command::new("jj")
             .arg("-R")
             .arg(&self.root)
             .args(args)
             .output()
+            .context("failed to spawn `jj`")?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "jj {} failed:\n{}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Async sibling of [`run_blocking`]: spawn a `jj` read via `tokio::process` and return stdout.
+    /// Independent reads built on this can be awaited concurrently (see [`resolve_many`]).
+    async fn run_async(&self, args: &[&str]) -> Result<String> {
+        let out = AsyncCommand::new("jj")
+            .arg("-R")
+            .arg(&self.root)
+            .args(args)
+            .output()
+            .await
             .context("failed to spawn `jj`")?;
         if !out.status.success() {
             return Err(anyhow!(
@@ -144,23 +167,43 @@ impl JjCli {
     /// re-snapshot the working tree (the dominant per-call cost in large repos). Commands that need
     /// `@` to reflect on-disk edits call [`Vcs::snapshot`] first; mutating jj commands snapshot on
     /// their own.
-    fn log(&self, revset: &str) -> Result<Vec<CommitInfo>> {
-        self.log_inner(revset, true)
+    async fn log(&self, revset: &str) -> Result<Vec<CommitInfo>> {
+        self.log_inner(revset, true).await
     }
 
-    fn log_inner(&self, revset: &str, ignore_wc: bool) -> Result<Vec<CommitInfo>> {
-        let mut args = vec!["log", "--no-graph"];
-        if ignore_wc {
-            args.push("--ignore-working-copy");
-        }
-        args.extend(["--color=never", "-r", revset, "-T", COMMIT_TEMPLATE]);
-        let stdout = self.run(&args)?;
-        stdout
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(parse_commit)
-            .collect()
+    async fn log_inner(&self, revset: &str, ignore_wc: bool) -> Result<Vec<CommitInfo>> {
+        let args = log_args(revset, ignore_wc);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        parse_log(&self.run_async(&argv).await?)
     }
+
+    /// Blocking sibling of [`log`] for the synchronous mutation path: [`JjTx`] reads back the
+    /// change id of `@`/`@-` right after a mutating `jj` op, where there is no concurrency to gain.
+    fn log_blocking(&self, revset: &str) -> Result<Vec<CommitInfo>> {
+        let args = log_args(revset, true);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        parse_log(&self.run_blocking(&argv)?)
+    }
+}
+
+/// Argument vector for a templated `--no-graph` log over `revset` (shared by the async, blocking,
+/// and concurrent-batch read paths so they stay byte-for-byte identical).
+fn log_args(revset: &str, ignore_wc: bool) -> Vec<String> {
+    let mut args = vec!["log".to_string(), "--no-graph".to_string()];
+    if ignore_wc {
+        args.push("--ignore-working-copy".to_string());
+    }
+    args.extend(["--color=never", "-r", revset, "-T", COMMIT_TEMPLATE].map(str::to_string));
+    args
+}
+
+/// Parse the stdout of a [`log_args`] invocation into neutral commits.
+fn parse_log(stdout: &str) -> Result<Vec<CommitInfo>> {
+    stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(parse_commit)
+        .collect()
 }
 
 /// Whether `path` is an executable file (git only runs hooks that are executable).
@@ -228,6 +271,7 @@ fn parse_commit(line: &str) -> Result<CommitInfo> {
     })
 }
 
+#[async_trait]
 impl Vcs for JjCli {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -236,30 +280,33 @@ impl Vcs for JjCli {
         }
     }
 
-    fn trunk(&self) -> Result<ChangeId> {
-        self.log("trunk()")?
+    async fn trunk(&self) -> Result<ChangeId> {
+        self.log("trunk()")
+            .await?
             .into_iter()
             .next()
             .map(|c| c.change_id)
             .ok_or_else(|| anyhow!("trunk() resolved to nothing"))
     }
 
-    fn has_remote_trunk(&self) -> Result<bool> {
+    async fn has_remote_trunk(&self) -> Result<bool> {
         // trunk() falls back to root() when no remote default exists (JJ_NOTES §8).
-        Ok(!self.log("trunk() ~ root()")?.is_empty())
+        Ok(!self.log("trunk() ~ root()").await?.is_empty())
     }
 
-    fn diff(&self, revset: &str) -> Result<String> {
-        self.run(&["diff", "--ignore-working-copy", "--color=never", "-r", revset])
+    async fn diff(&self, revset: &str) -> Result<String> {
+        self.run_async(&["diff", "--ignore-working-copy", "--color=never", "-r", revset])
+            .await
     }
 
-    fn staged_paths(&self) -> Result<Vec<String>> {
+    async fn staged_paths(&self) -> Result<Vec<String>> {
         // Query the colocated git index directly (jj doesn't touch it). Paths are root-relative.
-        let out = Command::new("git")
+        let out = AsyncCommand::new("git")
             .arg("-C")
             .arg(&self.root)
             .args(["diff", "--cached", "--name-only", "-z"])
             .output()
+            .await
             .context("failed to spawn `git`")?;
         if !out.status.success() {
             return Ok(vec![]); // not colocated / no index — treat as nothing staged
@@ -271,12 +318,13 @@ impl Vcs for JjCli {
             .collect())
     }
 
-    fn git_head(&self) -> Result<Option<String>> {
-        let out = Command::new("git")
+    async fn git_head(&self) -> Result<Option<String>> {
+        let out = AsyncCommand::new("git")
             .arg("-C")
             .arg(&self.root)
             .args(["rev-parse", "--verify", "-q", "HEAD"])
             .output()
+            .await
             .context("failed to spawn `git`")?;
         if !out.status.success() {
             return Ok(None); // unborn HEAD / not colocated
@@ -285,55 +333,74 @@ impl Vcs for JjCli {
         Ok((!s.is_empty()).then_some(s))
     }
 
-    fn set_git_head_branch(&self, branch: &str) -> Result<()> {
+    async fn set_git_head_branch(&self, branch: &str) -> Result<()> {
         let refname = format!("refs/heads/{branch}");
         // Only attach if jj has exported the bookmark to a git ref; otherwise leave HEAD as-is.
-        let exists = Command::new("git")
+        let exists = AsyncCommand::new("git")
             .arg("-C")
             .arg(&self.root)
             .args(["show-ref", "--verify", "--quiet", &refname])
             .status()
+            .await
             .map(|s| s.success())
             .unwrap_or(false);
         if !exists {
             return Ok(());
         }
-        Command::new("git")
+        AsyncCommand::new("git")
             .arg("-C")
             .arg(&self.root)
             .args(["symbolic-ref", "HEAD", &refname])
             .output()
+            .await
             .context("failed to spawn `git`")?;
         Ok(())
     }
 
-    fn resolve(&self, revset: &str) -> Result<Vec<CommitInfo>> {
-        self.log(revset)
+    async fn resolve(&self, revset: &str) -> Result<Vec<CommitInfo>> {
+        self.log(revset).await
     }
 
-    fn working_copy(&self) -> Result<CommitInfo> {
-        self.log("@")?
+    async fn resolve_many(&self, revsets: &[&str]) -> Result<Vec<Vec<CommitInfo>>> {
+        // Spawn each templated log as its own `jj` process and await them together: N independent
+        // reads cost ~one round-trip instead of N. Results stay aligned with `revsets` because
+        // `try_join_all` preserves input order regardless of completion order.
+        let outputs = futures::future::try_join_all(revsets.iter().map(|r| {
+            let args = log_args(r, true);
+            async move {
+                let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                self.run_async(&argv).await
+            }
+        }))
+        .await?;
+        outputs.iter().map(|o| parse_log(o)).collect()
+    }
+
+    async fn working_copy(&self) -> Result<CommitInfo> {
+        self.log("@")
+            .await?
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("could not resolve working-copy commit @"))
     }
 
-    fn snapshot(&self) -> Result<CommitInfo> {
+    async fn snapshot(&self) -> Result<CommitInfo> {
         // A log of `@` WITHOUT `--ignore-working-copy` snapshots the tree and returns the fresh `@`.
-        self.log_inner("@", false)?
+        self.log_inner("@", false)
+            .await?
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("could not resolve working-copy commit @"))
     }
 
-    fn split_interactive(&self, rev: &ChangeId) -> Result<()> {
+    async fn split_interactive(&self, rev: &ChangeId) -> Result<()> {
         self.run_interactive(&["split", "-r", rev.as_str()])
     }
 
-    fn bookmarks(&self) -> Result<Vec<Bookmark>> {
+    async fn bookmarks(&self) -> Result<Vec<Bookmark>> {
         // Derive from a log over bookmarked commits; `bookmarks()` revset is local-only (JJ_NOTES §1).
         let mut out = Vec::new();
-        for c in self.log("bookmarks()")? {
+        for c in self.log("bookmarks()").await? {
             for name in c.local_bookmarks {
                 out.push(Bookmark {
                     name,
@@ -344,8 +411,10 @@ impl Vcs for JjCli {
         Ok(out)
     }
 
-    fn workspace_count(&self) -> Result<usize> {
-        let out = self.run(&["workspace", "list", "--ignore-working-copy", "--color=never"])?;
+    async fn workspace_count(&self) -> Result<usize> {
+        let out = self
+            .run_async(&["workspace", "list", "--ignore-working-copy", "--color=never"])
+            .await?;
         Ok(out.lines().filter(|l| l.contains(':')).count())
     }
 
@@ -355,15 +424,17 @@ impl Vcs for JjCli {
         f(&mut tx)
     }
 
-    fn undo(&self) -> Result<String> {
+    async fn undo(&self) -> Result<String> {
         let (_out, stderr) = self.run_with_stderr(&["undo"])?;
         Ok(stderr.trim().to_string())
     }
 
-    fn current_op_id(&self) -> Result<String> {
+    async fn current_op_id(&self) -> Result<String> {
         // Snapshot the working copy first (no --ignore-working-copy) so pending edits become part of
         // the returned operation; restoring to it later brings those edits back as uncommitted `@`.
-        let out = self.run(&["op", "log", "--no-graph", "--color=never", "--limit", "1", "-T", "id"])?;
+        let out = self
+            .run_async(&["op", "log", "--no-graph", "--color=never", "--limit", "1", "-T", "id"])
+            .await?;
         let id = out.lines().next().unwrap_or("").trim().to_string();
         if id.is_empty() {
             return Err(anyhow!("could not resolve the current jj operation id"));
@@ -371,24 +442,34 @@ impl Vcs for JjCli {
         Ok(id)
     }
 
-    fn restore_op(&self, op_id: &str) -> Result<String> {
+    async fn restore_op(&self, op_id: &str) -> Result<String> {
         let (_out, stderr) = self.run_with_stderr(&["op", "restore", op_id])?;
         Ok(stderr.trim().to_string())
     }
 
-    fn workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+    async fn workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         // `jj workspace list` prints `name: <commit-summary>`; pair each name with its @ change id
         // via the `<name>@` revset. Per-workspace staleness detection is refined in Phase 5; here
         // only the current workspace's staleness is known cheaply.
-        let listing = self.run(&["workspace", "list", "--color=never"])?;
-        let current_stale = self.is_stale().unwrap_or(false);
-        let mut out = Vec::new();
-        for line in listing.lines() {
-            let Some((name, _)) = line.split_once(':') else {
-                continue;
-            };
-            let name = name.trim().to_string();
-            let target = self.workspace_target(&name)?;
+        let listing = self
+            .run_async(&["workspace", "list", "--color=never"])
+            .await?;
+        let current_stale = self.is_stale().await.unwrap_or(false);
+        // Resolve every workspace's `<name>@` target concurrently (one round-trip, not one per ws).
+        let names: Vec<String> = listing
+            .lines()
+            .filter_map(|l| l.split_once(':').map(|(n, _)| n.trim().to_string()))
+            .collect();
+        let revsets: Vec<String> = names.iter().map(|n| format!("{n}@")).collect();
+        let revset_refs: Vec<&str> = revsets.iter().map(String::as_str).collect();
+        let resolved = self.resolve_many(&revset_refs).await?;
+        let mut out = Vec::with_capacity(names.len());
+        for (name, commits) in names.into_iter().zip(resolved) {
+            let target = commits
+                .into_iter()
+                .next()
+                .map(|c| c.change_id)
+                .ok_or_else(|| anyhow!("workspace '{}' has no working copy", name))?;
             let is_stale = current_stale && name == "default";
             out.push(WorkspaceInfo {
                 name,
@@ -399,8 +480,8 @@ impl Vcs for JjCli {
         Ok(out)
     }
 
-    fn add_workspace(&self, path: &Path, name: &str, at: &ChangeId) -> Result<()> {
-        self.run(&[
+    async fn add_workspace(&self, path: &Path, name: &str, at: &ChangeId) -> Result<()> {
+        self.run_blocking(&[
             "workspace",
             "add",
             "--name",
@@ -412,23 +493,24 @@ impl Vcs for JjCli {
         Ok(())
     }
 
-    fn forget_workspace(&self, name: &str) -> Result<()> {
-        self.run(&["workspace", "forget", name])?;
+    async fn forget_workspace(&self, name: &str) -> Result<()> {
+        self.run_blocking(&["workspace", "forget", name])?;
         Ok(())
     }
 
-    fn update_stale(&self) -> Result<()> {
+    async fn update_stale(&self) -> Result<()> {
         self.run_with_stderr(&["workspace", "update-stale"])?;
         Ok(())
     }
 
-    fn is_stale(&self) -> Result<bool> {
+    async fn is_stale(&self) -> Result<bool> {
         // No direct query; `jj status` errors with "stale" when the current @ is stale (JJ_NOTES §11).
-        let out = Command::new("jj")
+        let out = AsyncCommand::new("jj")
             .arg("-R")
             .arg(&self.root)
             .args(["status", "--color=never"])
             .output()
+            .await
             .context("failed to spawn `jj`")?;
         if out.status.success() {
             return Ok(false);
@@ -441,7 +523,7 @@ impl Vcs for JjCli {
         }
     }
 
-    fn fetch(&self, remote: &str, branch: Option<&str>) -> Result<()> {
+    async fn fetch(&self, remote: &str, branch: Option<&str>) -> Result<()> {
         let mut args = vec!["git", "fetch", "--remote", remote];
         if let Some(b) = branch {
             args.push("--branch");
@@ -451,7 +533,7 @@ impl Vcs for JjCli {
         Ok(())
     }
 
-    fn push(&self, remote: &str, bookmark: &str, _opts: PushOpts) -> Result<()> {
+    async fn push(&self, remote: &str, bookmark: &str, _opts: PushOpts) -> Result<()> {
         // jj push is force-with-lease by default; `-b <name>` also creates/deletes by name
         // (no `--allow-new` needed — deprecated). (JJ_NOTES §10)
         let args = ["git", "push", "--remote", remote, "-b", bookmark];
@@ -481,13 +563,14 @@ impl Vcs for JjCli {
         Ok(())
     }
 
-    fn push_deleted(&self, remote: &str) -> Result<()> {
+    async fn push_deleted(&self, remote: &str) -> Result<()> {
         self.run_with_stderr(&["git", "push", "--remote", remote, "--deleted"])?;
         Ok(())
     }
 
-    fn run_pre_commit_hook(&self, scope: &CommitScope) -> Result<()> {
-        // Resolve the hook path, honouring core.hooksPath and the git-dir location.
+    async fn run_pre_commit_hook(&self, scope: &CommitScope) -> Result<()> {
+        // Resolve the hook path, honouring core.hooksPath and the git-dir location. Stays blocking:
+        // the hook itself inherits the terminal and must run to completion before the commit.
         let out = Command::new("git")
             .arg("-C")
             .arg(&self.root)
@@ -532,14 +615,16 @@ impl Vcs for JjCli {
         Ok(())
     }
 
-    fn add_remote(&self, name: &str, url: &str) -> Result<()> {
-        self.run(&["git", "remote", "add", name, url])?;
+    async fn add_remote(&self, name: &str, url: &str) -> Result<()> {
+        self.run_blocking(&["git", "remote", "add", name, url])?;
         Ok(())
     }
 
-    fn remotes(&self) -> Result<Vec<String>> {
+    async fn remotes(&self) -> Result<Vec<String>> {
         // Config read; doesn't depend on `@`, so don't snapshot (tolerate a stale workspace).
-        let out = self.run(&["git", "remote", "list", "--ignore-working-copy"])?;
+        let out = self
+            .run_async(&["git", "remote", "list", "--ignore-working-copy"])
+            .await?;
         Ok(out
             .lines()
             .filter_map(|l| l.split_whitespace().next())
@@ -548,10 +633,12 @@ impl Vcs for JjCli {
             .collect())
     }
 
-    fn remote_url(&self, name: &str) -> Result<Option<String>> {
+    async fn remote_url(&self, name: &str) -> Result<Option<String>> {
         // `jj git remote list` prints `<name> <url>` per line. `--ignore-working-copy` so opening
         // the engine in a stale workspace doesn't error before recovery (JJ_NOTES §11).
-        let out = self.run(&["git", "remote", "list", "--ignore-working-copy"])?;
+        let out = self
+            .run_async(&["git", "remote", "list", "--ignore-working-copy"])
+            .await?;
         Ok(out.lines().find_map(|l| {
             let mut it = l.split_whitespace();
             match (it.next(), it.next()) {
@@ -561,31 +648,20 @@ impl Vcs for JjCli {
         }))
     }
 
-    fn config_get(&self, key: &str) -> Result<Option<String>> {
+    async fn config_get(&self, key: &str) -> Result<Option<String>> {
         // `jj config get <key>` prints the value, or exits non-zero when the key is unset. A
         // missing key is not an error here — it's just `None`.
-        let out = Command::new("jj")
+        let out = AsyncCommand::new("jj")
             .arg("-R")
             .arg(&self.root)
             .args(["config", "get", key])
             .output()
+            .await
             .context("failed to spawn `jj`")?;
         if !out.status.success() {
             return Ok(None);
         }
         Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
-    }
-}
-
-impl JjCli {
-    /// Change id of the working copy of workspace `name`.
-    fn workspace_target(&self, name: &str) -> Result<ChangeId> {
-        let revset = format!("{}@", name);
-        self.log(&revset)?
-            .into_iter()
-            .next()
-            .map(|c| c.change_id)
-            .ok_or_else(|| anyhow!("workspace '{}' has no working copy", name))
     }
 }
 
@@ -623,7 +699,7 @@ impl<'a> VcsTx for JjTx<'a> {
         }
         // The finalized commit is now @-.
         self.cli
-            .log("@-")?
+            .log_blocking("@-")?
             .into_iter()
             .next()
             .map(|c| c.change_id)
@@ -668,7 +744,7 @@ impl<'a> VcsTx for JjTx<'a> {
     fn new_child(&mut self, parent: &ChangeId) -> Result<ChangeId> {
         self.cli.run_with_stderr(&["new", parent.as_str()])?;
         self.cli
-            .log("@")?
+            .log_blocking("@")?
             .into_iter()
             .next()
             .map(|c| c.change_id)

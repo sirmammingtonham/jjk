@@ -7,6 +7,7 @@ pub mod jj_cli;
 
 use crate::error::Result;
 use crate::model::{Bookmark, Capabilities, ChangeId, CommitInfo, WorkspaceInfo};
+use async_trait::async_trait;
 use std::path::Path;
 
 /// Options for pushing a bookmark to a remote.
@@ -32,110 +33,132 @@ pub enum CommitScope {
 /// The VCS port. Read methods are direct; mutations are grouped inside [`Vcs::transaction`] so a
 /// backend may make them atomic. The binary adapter runs each mutation as one `jj` invocation and
 /// reports `atomic_transactions: false`.
-pub trait Vcs {
+///
+/// **Reads are `async`** (driven by `tokio::process` in the binary adapter) so the engine can fan
+/// out *independent* reads concurrently — see [`resolve_many`](Vcs::resolve_many). Mutations stay
+/// synchronous: a jjk command performs a single serial sequence of `jj` ops, so there is no
+/// concurrency to exploit there, and keeping [`transaction`](Vcs::transaction) sync avoids
+/// threading async closures through every call site.
+#[async_trait]
+pub trait Vcs: Send + Sync {
     fn capabilities(&self) -> Capabilities;
 
     // ---- queries ----
 
     /// The trunk commit (`trunk()` revset). Falls back to root() when no remote default exists;
     /// callers that need the configured trunk bookmark should consult state instead.
-    fn trunk(&self) -> Result<ChangeId>;
+    async fn trunk(&self) -> Result<ChangeId>;
 
     /// Resolve a (neutral subset) revset into commits, newest-first as jj logs them.
-    fn resolve(&self, revset: &str) -> Result<Vec<CommitInfo>>;
+    async fn resolve(&self, revset: &str) -> Result<Vec<CommitInfo>>;
+
+    /// Resolve several **independent** revsets concurrently; results align positionally with
+    /// `revsets` (result `i` is the resolution of `revsets[i]`). The binary adapter spawns the `jj`
+    /// reads in parallel — one round-trip's latency instead of N — so callers should batch reads
+    /// that don't depend on each other here. The default implementation resolves sequentially, so
+    /// any adapter is correct without overriding it.
+    async fn resolve_many(&self, revsets: &[&str]) -> Result<Vec<Vec<CommitInfo>>> {
+        let mut out = Vec::with_capacity(revsets.len());
+        for r in revsets {
+            out.push(self.resolve(r).await?);
+        }
+        Ok(out)
+    }
 
     /// The current workspace's working-copy commit (`@`). Reads are non-snapshotting (fast); call
     /// [`snapshot`](Vcs::snapshot) first if you need `@` to reflect on-disk edits.
-    fn working_copy(&self) -> Result<CommitInfo>;
+    async fn working_copy(&self) -> Result<CommitInfo>;
 
     /// Snapshot the working copy (capturing on-disk edits) and return the resulting `@`. Reads
     /// otherwise skip snapshotting for speed (snapshotting a large tree is the dominant per-call
     /// cost), so call this when `@` must reflect current edits.
-    fn snapshot(&self) -> Result<CommitInfo>;
+    async fn snapshot(&self) -> Result<CommitInfo>;
 
     /// Split a revision into two interactively (`jj split` opens a diff editor; inherits the
     /// terminal). Descendants auto-rebase.
-    fn split_interactive(&self, rev: &ChangeId) -> Result<()>;
+    async fn split_interactive(&self, rev: &ChangeId) -> Result<()>;
 
     /// All local bookmarks.
-    fn bookmarks(&self) -> Result<Vec<Bookmark>>;
+    async fn bookmarks(&self) -> Result<Vec<Bookmark>>;
 
     /// Whether `trunk()` resolves to a real (non-root) commit, i.e. a remote default branch exists.
-    fn has_remote_trunk(&self) -> Result<bool>;
+    async fn has_remote_trunk(&self) -> Result<bool>;
 
     /// Human-readable diff for a revset (e.g. `base..tip`). Non-snapshotting.
-    fn diff(&self, revset: &str) -> Result<String>;
+    async fn diff(&self, revset: &str) -> Result<String>;
 
     /// Repo-root-relative paths currently staged in the colocated git index
     /// (`git diff --cached --name-only`). Empty when nothing is staged. jj ignores the index, so
     /// this is purely a signal of what the user staged (e.g. via their editor).
-    fn staged_paths(&self) -> Result<Vec<String>>;
+    async fn staged_paths(&self) -> Result<Vec<String>>;
 
     /// The commit the colocated git `HEAD` points at (`git rev-parse HEAD`), or `None` if there is
     /// no git HEAD (unborn / not colocated). Used to detect an external `git checkout`.
-    fn git_head(&self) -> Result<Option<String>>;
+    async fn git_head(&self) -> Result<Option<String>>;
 
     /// Attach the colocated git `HEAD` symbolically to `branch` (`git symbolic-ref`), so plain git
     /// shows the same branch jjk is on. jj leaves `HEAD` detached when it moves `@`; this re-points
     /// it. No-op if `refs/heads/<branch>` doesn't exist. Only rewrites the ref — never touches the
     /// working tree or index.
-    fn set_git_head_branch(&self, branch: &str) -> Result<()>;
+    async fn set_git_head_branch(&self, branch: &str) -> Result<()>;
 
     // ---- mutations (grouped) ----
 
     /// Run a sequence of mutations. The binary adapter executes them sequentially (best effort,
-    /// non-atomic); the crate adapter maps it to a single jj-lib transaction.
+    /// non-atomic); the crate adapter maps it to a single jj-lib transaction. Synchronous: the
+    /// mutations are an ordered, dependent sequence (one `jj` op at a time) with no concurrency to
+    /// exploit.
     fn transaction(&self, f: &mut dyn FnMut(&mut dyn VcsTx) -> Result<()>) -> Result<()>;
 
     /// Undo the last operation (`jj undo`). Returns the human description jj printed.
-    fn undo(&self) -> Result<String>;
+    async fn undo(&self) -> Result<String>;
 
     /// The id of the current head operation in jj's op log. Snapshots the working copy first (so the
     /// returned op captures any pending edits), making it a faithful "before" checkpoint to restore
     /// to. Used to make a whole jjk command (which is several jj operations) one undo unit.
-    fn current_op_id(&self) -> Result<String>;
+    async fn current_op_id(&self) -> Result<String>;
 
     /// Restore the repo to an earlier operation (`jj op restore <id>`); reverts commits, bookmarks
     /// and the working copy in one step. Returns the human description jj printed.
-    fn restore_op(&self, op_id: &str) -> Result<String>;
+    async fn restore_op(&self, op_id: &str) -> Result<String>;
 
     // ---- workspaces ----
 
-    fn workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
+    async fn workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
     /// Number of workspaces (cheap; non-snapshotting). Staleness is only possible with >1.
-    fn workspace_count(&self) -> Result<usize>;
-    fn add_workspace(&self, path: &Path, name: &str, at: &ChangeId) -> Result<()>;
-    fn forget_workspace(&self, name: &str) -> Result<()>;
+    async fn workspace_count(&self) -> Result<usize>;
+    async fn add_workspace(&self, path: &Path, name: &str, at: &ChangeId) -> Result<()>;
+    async fn forget_workspace(&self, name: &str) -> Result<()>;
     /// Update a stale workspace's working copy. No-op (Ok) if not stale.
-    fn update_stale(&self) -> Result<()>;
+    async fn update_stale(&self) -> Result<()>;
     /// True if the current workspace's `@` is stale.
-    fn is_stale(&self) -> Result<bool>;
+    async fn is_stale(&self) -> Result<bool>;
 
     // ---- remote (git interop lives inside the VCS backend) ----
 
     /// Fetch from `remote`. When `branch` is `Some`, fetch only that bookmark (the trunk) instead
     /// of every remote branch — stacking only needs trunk advanced, and a full fetch can fail on
     /// unrelated remote branches that won't fast-forward (`refs/remotes/...` update errors).
-    fn fetch(&self, remote: &str, branch: Option<&str>) -> Result<()>;
-    fn push(&self, remote: &str, bookmark: &str, opts: PushOpts) -> Result<()>;
+    async fn fetch(&self, remote: &str, branch: Option<&str>) -> Result<()>;
+    async fn push(&self, remote: &str, bookmark: &str, opts: PushOpts) -> Result<()>;
     /// Push all pending bookmark deletions to the remote (`jj git push --deleted`).
-    fn push_deleted(&self, remote: &str) -> Result<()>;
+    async fn push_deleted(&self, remote: &str) -> Result<()>;
     /// Run the git `pre-commit` hook (respecting `core.hooksPath`) the way `git commit` would:
     /// stage the in-scope changes so index-based hooks see them, then run the hook with the
     /// terminal. `All`/`Interactive` stage everything (`git add -A`); `Paths` stages just those
     /// paths so the hook sees exactly what will be committed. Returns `Err` if the hook exits
     /// non-zero; `Ok` if it passes or there is no executable hook.
-    fn run_pre_commit_hook(&self, scope: &CommitScope) -> Result<()>;
+    async fn run_pre_commit_hook(&self, scope: &CommitScope) -> Result<()>;
 
-    fn add_remote(&self, name: &str, url: &str) -> Result<()>;
+    async fn add_remote(&self, name: &str, url: &str) -> Result<()>;
     /// Names of configured remotes (excludes the colocated `git` pseudo-remote).
-    fn remotes(&self) -> Result<Vec<String>>;
+    async fn remotes(&self) -> Result<Vec<String>>;
     /// URL of a configured remote, if present.
-    fn remote_url(&self, name: &str) -> Result<Option<String>>;
+    async fn remote_url(&self, name: &str) -> Result<Option<String>>;
 
     /// Value of a jj config key (`jj config get <key>`), or `None` if it is unset. Lets jjk read
     /// user-set knobs (e.g. an opt-in flag in the repo's jj config) without its own config file.
-    fn config_get(&self, key: &str) -> Result<Option<String>>;
+    async fn config_get(&self, key: &str) -> Result<Option<String>>;
 }
 
 /// Mutation handle yielded inside [`Vcs::transaction`].

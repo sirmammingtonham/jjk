@@ -23,7 +23,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 /// Seed a `main` trunk commit and push it to origin.
-fn seed_main(e: &mut Engine, root: &Path) {
+async fn seed_main(e: &mut Engine, root: &Path) {
     write(root, "README.md", "# smoke\n");
     e.vcs()
         .transaction(&mut |tx| {
@@ -32,7 +32,7 @@ fn seed_main(e: &mut Engine, root: &Path) {
             Ok(())
         })
         .unwrap();
-    e.vcs().push("origin", "main", PushOpts::default()).unwrap();
+    e.vcs().push("origin", "main", PushOpts::default()).await.unwrap();
 }
 
 /// Clone the bare remote into a throwaway git workdir for simulating landings.
@@ -48,21 +48,21 @@ fn clone_remote(h: &RepoWithRemote) -> tempfile::TempDir {
     work
 }
 
-fn build_two_branch_stack(h: &mut RepoWithRemote) {
+async fn build_two_branch_stack(h: &mut RepoWithRemote) {
     let root = h.repo.path().to_path_buf();
-    seed_main(&mut h.engine, &root);
-    h.engine.branch_create("feat-a", true).unwrap();
+    seed_main(&mut h.engine, &root).await;
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "alpha\n");
-    h.engine.commit("feat-a: alpha").unwrap();
-    h.engine.branch_create("feat-b", true).unwrap();
+    h.engine.commit("feat-a: alpha").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
     write(&root, "b.txt", "bravo\n");
-    h.engine.commit("feat-b: bravo").unwrap();
+    h.engine.commit("feat-b: bravo").await.unwrap();
 }
 
 #[tokio::test]
 async fn sync_after_squash_merge_of_bottom() {
-    let mut h = setup_with_remote();
-    build_two_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    build_two_branch_stack(&mut h).await;
 
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
@@ -80,7 +80,7 @@ async fn sync_after_squash_merge_of_bottom() {
     let report = h.engine.sync(true).await.unwrap();
     assert!(report.conflicts.is_empty(), "no conflicts: {:?}", report.conflicts);
 
-    let stack = h.engine.derive_stack().unwrap();
+    let stack = h.engine.derive_stack().await.unwrap();
     let names: Vec<_> = stack.branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["feat-b"], "feat-a abandoned; feat-b survives");
 
@@ -90,15 +90,15 @@ async fn sync_after_squash_merge_of_bottom() {
     assert_eq!(feat_b.commit_count(), 1);
     assert!(!feat_b.commits[0].is_empty, "feat-b not garbled into empty");
     // feat-a bookmark really gone.
-    assert!(!h.engine.vcs().bookmarks().unwrap().iter().any(|b| b.name == "feat-a"));
+    assert!(!h.engine.vcs().bookmarks().await.unwrap().iter().any(|b| b.name == "feat-a"));
     // feat-b's PR retargeted to trunk.
     assert_eq!(fake.pr_for("feat-b").unwrap().base, "main");
 }
 
 #[tokio::test]
 async fn sync_after_merge_commit_of_bottom() {
-    let mut h = setup_with_remote();
-    build_two_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    build_two_branch_stack(&mut h).await;
 
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
@@ -117,7 +117,7 @@ async fn sync_after_merge_commit_of_bottom() {
     let report = h.engine.sync(true).await.unwrap();
     assert!(report.conflicts.is_empty(), "no conflicts: {:?}", report.conflicts);
 
-    let stack = h.engine.derive_stack().unwrap();
+    let stack = h.engine.derive_stack().await.unwrap();
     let names: Vec<_> = stack.branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["feat-b"], "feat-a dropped (in trunk); feat-b survives");
 
@@ -125,7 +125,7 @@ async fn sync_after_merge_commit_of_bottom() {
     assert!(feat_b.commits[0].parents.contains(&stack.trunk));
     assert_eq!(feat_b.commit_count(), 1);
     assert!(!feat_b.commits[0].is_empty);
-    assert!(!h.engine.vcs().bookmarks().unwrap().iter().any(|b| b.name == "feat-a"));
+    assert!(!h.engine.vcs().bookmarks().await.unwrap().iter().any(|b| b.name == "feat-a"));
     assert_eq!(fake.pr_for("feat-b").unwrap().base, "main");
 
     // The trunk now actually contains feat-a's file (a.txt) — clean, non-duplicated history.
@@ -135,8 +135,8 @@ async fn sync_after_merge_commit_of_bottom() {
 
 #[tokio::test]
 async fn sync_with_no_merges_is_safe() {
-    let mut h = setup_with_remote();
-    build_two_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    build_two_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
     h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
@@ -144,7 +144,7 @@ async fn sync_with_no_merges_is_safe() {
     // Nothing merged: sync should be a safe no-op on the stack shape.
     let report = h.engine.sync(true).await.unwrap();
     assert!(report.notes.iter().any(|n| n.contains("no merged")));
-    let stack = h.engine.derive_stack().unwrap();
+    let stack = h.engine.derive_stack().await.unwrap();
     let names: Vec<_> = stack.branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["feat-a", "feat-b"]);
 }
@@ -153,16 +153,16 @@ async fn sync_with_no_merges_is_safe() {
 async fn sync_reports_conflict_without_aborting() {
     // feat-b modifies the same file feat-a created; squash-landing feat-a's content differently
     // makes feat-b conflict when rebased onto trunk. sync must complete and REPORT, not abort.
-    let mut h = setup_with_remote();
+    let mut h = setup_with_remote().await;
     let root = h.repo.path().to_path_buf();
-    seed_main(&mut h.engine, &root);
+    seed_main(&mut h.engine, &root).await;
 
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "shared.txt", "from-a\n");
-    h.engine.commit("feat-a: shared").unwrap();
-    h.engine.branch_create("feat-b", true).unwrap();
+    h.engine.commit("feat-a: shared").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
     write(&root, "shared.txt", "from-b\n");
-    h.engine.commit("feat-b: shared edit").unwrap();
+    h.engine.commit("feat-b: shared edit").await.unwrap();
 
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
@@ -185,7 +185,7 @@ async fn sync_reports_conflict_without_aborting() {
         report.notes
     );
     // feat-b still present (conflicted), stack intact.
-    assert!(h.engine.derive_stack().unwrap().branch("feat-b").is_some());
+    assert!(h.engine.derive_stack().await.unwrap().branch("feat-b").is_some());
 }
 
 /// Run a raw `jj` command in `root` (for test setup that jjk doesn't expose).
@@ -205,7 +205,7 @@ async fn sync_with_branch_stacked_on_merged_immutable_commits() {
     // Regression: tracking an existing branch that was part of an already-merged stack leaves
     // immutable commits between trunk and your new branch. derive/ls must exclude them, and sync
     // must not try to rewrite them (jj refuses; it used to crash with "Commit ... is immutable").
-    let mut h = setup_with_remote();
+    let mut h = setup_with_remote().await;
     let root = h.repo.path().to_path_buf();
 
     // Seed trunk.
@@ -232,7 +232,7 @@ async fn sync_with_branch_stacked_on_merged_immutable_commits() {
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
     // Derivation excludes the immutable commits: feat-new is one branch with one commit.
-    let stack = h.engine.derive_stack().unwrap();
+    let stack = h.engine.derive_stack().await.unwrap();
     assert_eq!(
         stack.branches.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
         ["feat-new"]
@@ -242,7 +242,7 @@ async fn sync_with_branch_stacked_on_merged_immutable_commits() {
     // sync must complete (not crash on immutable commits) and rebase feat-new straight onto trunk.
     h.engine.sync(true).await.unwrap();
 
-    let after = h.engine.derive_stack().unwrap();
+    let after = h.engine.derive_stack().await.unwrap();
     let feat_new = after.branch("feat-new").unwrap();
     assert!(
         feat_new.commits[0].parents.contains(&after.trunk),
@@ -265,8 +265,8 @@ fn remote_sha(bare: &Path, branch: &str) -> String {
 
 #[tokio::test]
 async fn sync_no_push_reconciles_locally_without_pushing() {
-    let mut h = setup_with_remote();
-    build_two_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    build_two_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
     h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
@@ -292,7 +292,7 @@ async fn sync_no_push_reconciles_locally_without_pushing() {
     );
 
     // Local reconciliation DID happen: feat-a dropped, feat-b rebased onto trunk.
-    let stack = h.engine.derive_stack().unwrap();
+    let stack = h.engine.derive_stack().await.unwrap();
     assert_eq!(
         stack.branches.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
         ["feat-b"]

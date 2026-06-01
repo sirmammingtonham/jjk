@@ -95,7 +95,11 @@ impl Engine {
     // ---------------------------------------------------------------- repo setup
 
     /// `jjk repo init`: init colocated, detect/store trunk + remote, write state.
-    pub fn repo_init(dir: &Path, trunk: Option<String>, remote: Option<String>) -> Result<Report> {
+    pub async fn repo_init(
+        dir: &Path,
+        trunk: Option<String>,
+        remote: Option<String>,
+    ) -> Result<Report> {
         use crate::vcs::jj_cli::JjCli;
         let mut report = Report::default();
         let already = dir.join(".jj").join("jjk").join("state.toml").exists();
@@ -113,13 +117,13 @@ impl Engine {
 
         let remote = match remote {
             Some(r) => r,
-            None => vcs.remotes()?.into_iter().next().unwrap_or_else(|| "origin".to_string()),
+            None => vcs.remotes().await?.into_iter().next().unwrap_or_else(|| "origin".to_string()),
         };
         // Trunk detection: prefer an explicit name; else a `main`/`master` bookmark; else "main".
         let trunk = match trunk {
             Some(t) => t,
             None => {
-                let bms = vcs.bookmarks()?;
+                let bms = vcs.bookmarks().await?;
                 ["main", "master", "trunk"]
                     .into_iter()
                     .find(|cand| bms.iter().any(|b| b.name == *cand))
@@ -163,21 +167,22 @@ impl Engine {
     }
 
     /// The forge, built on first use (querying the remote only when a forge command runs).
-    fn forge(&self) -> Result<&dyn Forge> {
+    async fn forge(&self) -> Result<&dyn Forge> {
         if self.forge.get().is_none() {
-            let f = self.build_forge()?;
+            let f = self.build_forge().await?;
             let _ = self.forge.set(f);
         }
         Ok(self.forge.get().expect("just initialized").as_ref())
     }
 
-    fn build_forge(&self) -> Result<Box<dyn Forge>> {
+    async fn build_forge(&self) -> Result<Box<dyn Forge>> {
         use crate::forge::gh_cli::GhCli;
         match self.forge_backend.as_str() {
             "gh_cli" => {
                 let slug = self
                     .vcs
-                    .remote_url(&self.state.config.remote)?
+                    .remote_url(&self.state.config.remote)
+                    .await?
                     .and_then(|u| GhCli::slug_from_url(&u));
                 Ok(Box::new(GhCli::new(slug)))
             }
@@ -192,22 +197,23 @@ impl Engine {
 
     /// Trunk anchor as `(revset, change_id)`. Prefers the stored trunk bookmark (since `trunk()`
     /// falls back to root() with no remote — JJ_NOTES §8); falls back to the `trunk()` revset.
-    fn trunk_anchor(&self) -> Result<(String, ChangeId)> {
+    async fn trunk_anchor(&self) -> Result<(String, ChangeId)> {
         let tname = self.state.config.trunk.clone();
-        if let Some(id) = self.resolve_bookmark(&tname)? {
+        if let Some(id) = self.resolve_bookmark(&tname).await? {
             Ok((tname, id))
         } else {
-            let id = self.vcs.trunk()?;
+            let id = self.vcs.trunk().await?;
             Ok(("trunk()".to_string(), id))
         }
     }
 
     /// Resolve a single local bookmark to its target change id, if it exists. Targeted query
     /// (`bookmarks(exact:..)`) rather than scanning every bookmark in the repo.
-    fn resolve_bookmark(&self, name: &str) -> Result<Option<ChangeId>> {
+    async fn resolve_bookmark(&self, name: &str) -> Result<Option<ChangeId>> {
         Ok(self
             .vcs
-            .resolve(&format!("bookmarks(exact:{name:?})"))?
+            .resolve(&format!("bookmarks(exact:{name:?})"))
+            .await?
             .into_iter()
             .next()
             .map(|c| c.change_id))
@@ -215,16 +221,17 @@ impl Engine {
 
     /// The branch the working copy currently sits on (nearest local bookmark at-or-below `@`,
     /// excluding trunk). `None` means the working copy is on trunk.
-    pub fn current_branch(&self) -> Result<Option<String>> {
-        Ok(self.current_branch_tip()?.map(|(name, _)| name))
+    pub async fn current_branch(&self) -> Result<Option<String>> {
+        Ok(self.current_branch_tip().await?.map(|(name, _)| name))
     }
 
     /// The current branch's name **and** tip change id in one query (the nearest stack bookmark
     /// at-or-below `@`). Avoids a second `branch_tip` lookup for callers that need both.
-    fn current_branch_tip(&self) -> Result<Option<(String, ChangeId)>> {
+    async fn current_branch_tip(&self) -> Result<Option<(String, ChangeId)>> {
         let res = self
             .vcs
-            .resolve(&format!("heads(::@ & {STACK_BOOKMARKS})"))?;
+            .resolve(&format!("heads(::@ & {STACK_BOOKMARKS})"))
+            .await?;
         Ok(res.into_iter().next().and_then(|c| {
             c.local_bookmarks
                 .iter()
@@ -238,34 +245,58 @@ impl Engine {
         name != self.state.config.trunk && !name.starts_with("jjk/stash/")
     }
 
-    fn branch_tip(&self, name: &str) -> Result<ChangeId> {
-        self.resolve_bookmark(name)?
+    async fn branch_tip(&self, name: &str) -> Result<ChangeId> {
+        self.resolve_bookmark(name)
+            .await?
             .ok_or_else(|| JjkError::UnknownBranch(name.to_string()).into())
     }
 
     /// First commits of the branches directly upstack of `branch_tip` (its nearest descendant
     /// bookmarks). Used to restack the upstack after a mid-stack commit (ARCH §3.3 step 3).
-    fn upstack_first_commits(&self, branch_tip: &ChangeId) -> Result<Vec<ChangeId>> {
+    async fn upstack_first_commits(&self, branch_tip: &ChangeId) -> Result<Vec<ChangeId>> {
         let tip = branch_tip.as_str();
         let near = self
             .vcs
-            .resolve(&format!("roots(({tip}:: ~ {tip}) & {STACK_BOOKMARKS})"))?;
-        let mut firsts = Vec::new();
-        for b in near {
-            let r = self
-                .vcs
-                .resolve(&format!("roots({tip}..{})", b.change_id.as_str()))?;
-            if let Some(f) = r.into_iter().next() {
-                firsts.push(f.change_id);
-            }
-        }
-        Ok(firsts)
+            .resolve(&format!("roots(({tip}:: ~ {tip}) & {STACK_BOOKMARKS})"))
+            .await?;
+        // Each near branch's first commit is an independent `roots(tip..b)` read → resolve them
+        // concurrently (one round-trip instead of one per upstack branch).
+        let revsets: Vec<String> = near
+            .iter()
+            .map(|b| format!("roots({tip}..{})", b.change_id.as_str()))
+            .collect();
+        let revset_refs: Vec<&str> = revsets.iter().map(String::as_str).collect();
+        let resolved = self.vcs.resolve_many(&revset_refs).await?;
+        Ok(resolved
+            .into_iter()
+            .filter_map(|commits| commits.into_iter().next().map(|c| c.change_id))
+            .collect())
     }
 
     /// Reconstruct the stack containing `@` from jj. Bottom (nearest trunk) → top.
-    pub fn derive_stack(&self) -> Result<Stack> {
-        let (trunk_revset, trunk_id) = self.trunk_anchor()?;
-        let cur = self.current_branch_tip()?;
+    pub async fn derive_stack(&self) -> Result<Stack> {
+        // The trunk-bookmark resolution and the current-branch-tip query are independent reads;
+        // issue them concurrently (one round-trip instead of two). Mirrors `trunk_anchor` +
+        // `current_branch_tip`, kept inline so both can share a single `resolve_many`.
+        let tname = self.state.config.trunk.clone();
+        let batch = self
+            .vcs
+            .resolve_many(&[
+                &format!("bookmarks(exact:{tname:?})"),
+                &format!("heads(::@ & {STACK_BOOKMARKS})"),
+            ])
+            .await?;
+        let (trunk_revset, trunk_id) = match batch[0].first() {
+            Some(c) => (tname.clone(), c.change_id.clone()),
+            // No local trunk bookmark — fall back to the `trunk()` revset (JJ_NOTES §8).
+            None => ("trunk()".to_string(), self.vcs.trunk().await?),
+        };
+        let cur: Option<(String, ChangeId)> = batch[1].first().and_then(|c| {
+            c.local_bookmarks
+                .iter()
+                .find(|b| self.is_stack_bookmark(b))
+                .map(|name| (name.clone(), c.change_id.clone()))
+        });
         let current = cur.as_ref().map(|(n, _)| n.clone());
 
         // Anchor for the "upstack" search: the current branch tip, or trunk if on trunk.
@@ -276,7 +307,8 @@ impl Engine {
         // branch tip itself (reusing the id we already resolved — no extra query).
         let upmost = self
             .vcs
-            .resolve(&format!("heads(({cur_tip}:: ~ {cur_tip}) & {STACK_BOOKMARKS})"))?;
+            .resolve(&format!("heads(({cur_tip}:: ~ {cur_tip}) & {STACK_BOOKMARKS})"))
+            .await?;
         let top_id = upmost
             .into_iter()
             .next()
@@ -289,7 +321,8 @@ impl Engine {
         // previously-merged stack would display (and try to rebase) those immutable commits.
         let mut commits = self
             .vcs
-            .resolve(&format!("({}..{}) & mutable()", trunk_revset, top_id.as_str()))?;
+            .resolve(&format!("({}..{}) & mutable()", trunk_revset, top_id.as_str()))
+            .await?;
         commits.reverse(); // bottom → top
 
         // Group into branches: a commit carrying a (non-trunk) local bookmark closes a branch.
@@ -330,16 +363,20 @@ impl Engine {
     /// onto the new `HEAD`). Returns `true` if it had to reconcile. Cheap in the common case (two
     /// non-snapshotting queries, no snapshot). Staleness (multi-workspace only) is handled
     /// separately; with one workspace a snapshot can't be stale-blocked.
-    pub fn reconcile_git_head(&self) -> Result<bool> {
-        let Some(head) = self.vcs.git_head()? else {
+    pub async fn reconcile_git_head(&self) -> Result<bool> {
+        // git HEAD (git) and jj's `@-` (jj) are independent reads on different tools — resolve them
+        // concurrently so the common no-op case costs one round-trip, not two.
+        let (head, base_commit) =
+            tokio::try_join!(self.vcs.git_head(), self.vcs.resolve("@-"))?;
+        let Some(head) = head else {
             return Ok(false);
         };
-        let base = self.vcs.resolve("@-")?.into_iter().next().map(|c| c.commit_id.0);
+        let base = base_commit.into_iter().next().map(|c| c.commit_id.0);
         if base.as_deref() == Some(head.as_str()) {
             return Ok(false); // jj already in sync with git HEAD (the normal case)
         }
-        if self.vcs.workspace_count()? <= 1 {
-            self.vcs.snapshot()?; // triggers jj's "reset working copy parent to git HEAD"
+        if self.vcs.workspace_count().await? <= 1 {
+            self.vcs.snapshot().await?; // triggers jj's "reset working copy parent to git HEAD"
             return Ok(true);
         }
         Ok(false)
@@ -355,18 +392,28 @@ impl Engine {
     /// bookmark rides the empty `@` (tip == `@`, not `@-`); attaching there would point `HEAD` at
     /// `@` and trigger a spurious reconcile, so we leave it until the first commit moves the
     /// bookmark down to `@-`.
-    pub fn sync_git_head_to_current(&self) -> Result<()> {
-        let Some((branch, tip)) = self.current_branch_tip()? else {
+    pub async fn sync_git_head_to_current(&self) -> Result<()> {
+        // The current branch tip (`heads(::@ & STACK)`) and `@-` are independent reads — resolve
+        // them concurrently; this runs after every command, so the saved round-trip adds up.
+        let cur_revset = format!("heads(::@ & {STACK_BOOKMARKS})");
+        let (cur, parent) = tokio::try_join!(
+            self.vcs.resolve(&cur_revset),
+            self.vcs.resolve("@-")
+        )?;
+        let Some((branch, tip)) = cur.into_iter().next().and_then(|c| {
+            c.local_bookmarks
+                .iter()
+                .find(|b| self.is_stack_bookmark(b))
+                .map(|name| (name.clone(), c.change_id.clone()))
+        }) else {
             return Ok(());
         };
-        let at_parent = self
-            .vcs
-            .resolve("@-")?
+        let at_parent = parent
             .into_iter()
             .next()
             .is_some_and(|p| p.change_id == tip);
         if at_parent {
-            self.vcs.set_git_head_branch(&branch)?;
+            self.vcs.set_git_head_branch(&branch).await?;
         }
         Ok(())
     }
@@ -374,14 +421,14 @@ impl Engine {
     // ---------------------------------------------------------------- staleness guard
 
     /// Auto-recover a stale working copy before any command that reads `@` (ARCH §8/§12).
-    fn ensure_fresh(&self, report: &mut Report) -> Result<()> {
+    async fn ensure_fresh(&self, report: &mut Report) -> Result<()> {
         // Staleness can only happen across multiple workspaces. With one workspace, skip the
         // (snapshotting, and therefore expensive) `jj status` check entirely.
-        if self.vcs.workspace_count()? <= 1 {
+        if self.vcs.workspace_count().await? <= 1 {
             return Ok(());
         }
-        if self.vcs.is_stale()? {
-            self.vcs.update_stale()?;
+        if self.vcs.is_stale().await? {
+            self.vcs.update_stale().await?;
             report.note("recovered stale working copy (jj workspace update-stale)");
         }
         Ok(())
@@ -391,27 +438,27 @@ impl Engine {
 
     /// Run the git `pre-commit` hook (git semantics): blocks the commit if it fails. Callers skip
     /// this when `--no-verify` is given.
-    pub fn run_pre_commit(&self, scope: &CommitScope) -> Result<()> {
-        self.vcs.run_pre_commit_hook(scope)
+    pub async fn run_pre_commit(&self, scope: &CommitScope) -> Result<()> {
+        self.vcs.run_pre_commit_hook(scope).await
     }
 
     /// Root-relative paths currently staged in the colocated git index (empty if none).
-    pub fn staged_paths(&self) -> Result<Vec<String>> {
-        self.vcs.staged_paths()
+    pub async fn staged_paths(&self) -> Result<Vec<String>> {
+        self.vcs.staged_paths().await
     }
 
     /// `jjk commit -m M` — commit the whole working copy (ARCH §3.3).
-    pub fn commit(&mut self, message: &str) -> Result<Report> {
-        self.commit_scoped(message, &CommitScope::All)
+    pub async fn commit(&mut self, message: &str) -> Result<Report> {
+        self.commit_scoped(message, &CommitScope::All).await
     }
 
     /// `jjk commit` with an explicit scope: all, specific paths (incl. git-staged), or interactive.
     /// Anything outside the scope stays uncommitted in `@`.
-    pub fn commit_scoped(&mut self, message: &str, scope: &CommitScope) -> Result<Report> {
+    pub async fn commit_scoped(&mut self, message: &str, scope: &CommitScope) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let (branch, old_tip) = self.current_branch_tip()?.ok_or(JjkError::NotOnBranch)?;
-        let upstack_firsts = self.upstack_first_commits(&old_tip)?;
+        self.ensure_fresh(&mut report).await?;
+        let (branch, old_tip) = self.current_branch_tip().await?.ok_or(JjkError::NotOnBranch)?;
+        let upstack_firsts = self.upstack_first_commits(&old_tip).await?;
 
         let branch_cl = branch.clone();
         let mut new_tip: Option<ChangeId> = None;
@@ -434,16 +481,16 @@ impl Engine {
             report.note(format!("restacked {n} upstack {}", plural(n, "branch", "branches")));
         }
         report.note(format!("committed to {branch}"));
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 
     /// `jjk commit --amend [-m M]` — squash working changes into the branch tip; descendants
     /// auto-rebase (ARCH §3.3 amend).
-    pub fn commit_amend(&mut self, message: Option<&str>) -> Result<Report> {
+    pub async fn commit_amend(&mut self, message: Option<&str>) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let (branch, tip) = self.current_branch_tip()?.ok_or(JjkError::NotOnBranch)?;
+        self.ensure_fresh(&mut report).await?;
+        let (branch, tip) = self.current_branch_tip().await?.ok_or(JjkError::NotOnBranch)?;
         let msg = message.map(|s| s.to_string());
         self.vcs.transaction(&mut |tx| {
             tx.squash_working_into(&tip)?;
@@ -453,21 +500,21 @@ impl Engine {
             Ok(())
         })?;
         report.note(format!("amended {branch}"));
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 
     /// `jjk branch create [NAME]` (tracked) / `jjk checkout -b NAME` (untracked).
-    pub fn branch_create(&mut self, name: &str, tracked: bool) -> Result<Report> {
+    pub async fn branch_create(&mut self, name: &str, tracked: bool) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        if self.vcs.bookmarks()?.iter().any(|b| b.name == name) {
+        self.ensure_fresh(&mut report).await?;
+        if self.vcs.bookmarks().await?.iter().any(|b| b.name == name) {
             return Err(JjkError::Msg(format!("branch '{name}' already exists")).into());
         }
         // Stack on the current branch tip, or trunk if on trunk.
-        let base = match self.current_branch()? {
-            Some(b) => self.branch_tip(&b)?,
-            None => self.trunk_anchor()?.1,
+        let base = match self.current_branch().await? {
+            Some(b) => self.branch_tip(&b).await?,
+            None => self.trunk_anchor().await?.1,
         };
         let name_cl = name.to_string();
         self.vcs.transaction(&mut |tx| {
@@ -486,13 +533,13 @@ impl Engine {
     }
 
     /// `jjk checkout NAME` — switch to an existing branch (always safe in jj).
-    pub fn checkout(&mut self, name: &str) -> Result<Report> {
+    pub async fn checkout(&mut self, name: &str) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
+        self.ensure_fresh(&mut report).await?;
         let tip = if name == self.state.config.trunk {
-            self.trunk_anchor()?.1
+            self.trunk_anchor().await?.1
         } else {
-            self.branch_tip(name)?
+            self.branch_tip(name).await?
         };
         self.vcs.transaction(&mut |tx| {
             tx.new_child(&tip)?;
@@ -503,10 +550,10 @@ impl Engine {
     }
 
     /// Navigation: reposition `@` onto a target branch's tip.
-    pub fn navigate(&mut self, dir: NavDir) -> Result<Report> {
+    pub async fn navigate(&mut self, dir: NavDir) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let stack = self.derive_stack()?;
+        self.ensure_fresh(&mut report).await?;
+        let stack = self.derive_stack().await?;
         let target: String = match dir {
             NavDir::Up => {
                 let cur = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
@@ -534,7 +581,7 @@ impl Engine {
         let tip = if target == stack.trunk_name {
             stack.trunk.clone()
         } else {
-            self.branch_tip(&target)?
+            self.branch_tip(&target).await?
         };
         self.vcs.transaction(&mut |tx| {
             tx.new_child(&tip)?;
@@ -547,10 +594,10 @@ impl Engine {
     /// `jjk restack` — ensure each upstack branch's first commit is parented on its downstack
     /// branch's tip. Usually a **no-op** (jj already auto-rebased on every rewrite); this repairs
     /// any drift and reports what moved.
-    pub fn restack(&mut self) -> Result<Report> {
+    pub async fn restack(&mut self) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let stack = self.derive_stack()?;
+        self.ensure_fresh(&mut report).await?;
+        let stack = self.derive_stack().await?;
 
         // (first_commit_to_rebase, destination). Computed against stable change ids.
         let mut actions: Vec<(ChangeId, ChangeId)> = Vec::new();
@@ -576,22 +623,22 @@ impl Engine {
             let n = actions.len();
             report.note(format!("restacked {n} {}", plural(n, "branch", "branches")));
         }
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 
     /// `jjk track [NAME]` / `jjk untrack [NAME]` — toggle stack-tracking. Defaults to the current
     /// branch. Tracking governs PR intent (only tracked branches are submitted in Phase 3).
-    pub fn set_tracked(&mut self, name: Option<&str>, tracked: bool) -> Result<Report> {
+    pub async fn set_tracked(&mut self, name: Option<&str>, tracked: bool) -> Result<Report> {
         let mut report = Report::default();
         let name = match name {
             Some(n) => n.to_string(),
-            None => self.current_branch()?.ok_or(JjkError::NotOnBranch)?,
+            None => self.current_branch().await?.ok_or(JjkError::NotOnBranch)?,
         };
         if name == self.state.config.trunk {
             return Err(JjkError::IsTrunk(name).into());
         }
-        if !self.vcs.bookmarks()?.iter().any(|b| b.name == name) {
+        if !self.vcs.bookmarks().await?.iter().any(|b| b.name == name) {
             return Err(JjkError::UnknownBranch(name).into());
         }
         self.state.branch_mut(&name).tracked = tracked;
@@ -605,13 +652,13 @@ impl Engine {
 
     /// `jjk branch delete NAME` — drop the branch and heal the gap: abandon its commit range so the
     /// upstack auto-reconnects to NAME's parent (downstack branch tip or trunk). (PR close: Phase 3.)
-    pub fn branch_delete(&mut self, name: &str) -> Result<Report> {
+    pub async fn branch_delete(&mut self, name: &str) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
+        self.ensure_fresh(&mut report).await?;
         if name == self.state.config.trunk {
             return Err(JjkError::IsTrunk(name.to_string()).into());
         }
-        let stack = self.derive_stack()?;
+        let stack = self.derive_stack().await?;
         let branch = stack
             .branch(name)
             .ok_or_else(|| JjkError::UnknownBranch(name.to_string()))?;
@@ -624,7 +671,7 @@ impl Engine {
         })?;
 
         // Defensive: if a bookmark somehow survived (e.g. it wasn't on the abandoned tip), drop it.
-        if self.vcs.bookmarks()?.iter().any(|b| b.name == name) {
+        if self.vcs.bookmarks().await?.iter().any(|b| b.name == name) {
             let n = name.to_string();
             self.vcs.transaction(&mut |tx| tx.delete_bookmark(&n))?;
         }
@@ -635,17 +682,17 @@ impl Engine {
         if had_upstack {
             report.note("upstack reconnected to its parent");
         }
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 
     // ---------------------------------------------------------------- branch restructuring
 
     /// `jjk trunk` — switch to the trunk branch.
-    pub fn trunk_checkout(&mut self) -> Result<Report> {
+    pub async fn trunk_checkout(&mut self) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let (_, id) = self.trunk_anchor()?;
+        self.ensure_fresh(&mut report).await?;
+        let (_, id) = self.trunk_anchor().await?;
         self.vcs.transaction(&mut |tx| {
             tx.new_child(&id)?;
             Ok(())
@@ -656,10 +703,10 @@ impl Engine {
 
     /// `jjk branch onto <target>` — move the current branch and everything stacked above it onto a
     /// new base (`target` branch's tip, or trunk). The upstack rides along (jj auto-rebases).
-    pub fn branch_onto(&mut self, target: &str) -> Result<Report> {
+    pub async fn branch_onto(&mut self, target: &str) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let stack = self.derive_stack()?;
+        self.ensure_fresh(&mut report).await?;
+        let stack = self.derive_stack().await?;
         let branch = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
         if target == branch {
             return Err(JjkError::Msg("cannot move a branch onto itself".into()).into());
@@ -672,32 +719,32 @@ impl Engine {
         let dest = if target == stack.trunk_name {
             stack.trunk.clone()
         } else {
-            self.branch_tip(target)?
+            self.branch_tip(target).await?
         };
         self.vcs.transaction(&mut |tx| {
             tx.rebase(&first, &dest)?;
             Ok(())
         })?;
         report.note(format!("moved '{branch}' onto '{target}'"));
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 
     /// `jjk branch rename [old] <new>` — rename a branch (default: the current one), preserving its
     /// PR mapping in state.
-    pub fn branch_rename(&mut self, old: Option<&str>, new: &str) -> Result<Report> {
+    pub async fn branch_rename(&mut self, old: Option<&str>, new: &str) -> Result<Report> {
         let mut report = Report::default();
         let old = match old {
             Some(o) => o.to_string(),
-            None => self.current_branch()?.ok_or(JjkError::NotOnBranch)?,
+            None => self.current_branch().await?.ok_or(JjkError::NotOnBranch)?,
         };
         if old == self.state.config.trunk {
             return Err(JjkError::IsTrunk(old).into());
         }
-        if self.resolve_bookmark(&old)?.is_none() {
+        if self.resolve_bookmark(&old).await?.is_none() {
             return Err(JjkError::UnknownBranch(old).into());
         }
-        if self.resolve_bookmark(new)?.is_some() {
+        if self.resolve_bookmark(new).await?.is_some() {
             return Err(JjkError::Msg(format!("branch '{new}' already exists")).into());
         }
         let (o, n) = (old.clone(), new.to_string());
@@ -711,8 +758,8 @@ impl Engine {
     }
 
     /// `jjk branch diff` — show the current branch's diff against its base (downstack tip / trunk).
-    pub fn branch_diff(&self) -> Result<String> {
-        let stack = self.derive_stack()?;
+    pub async fn branch_diff(&self) -> Result<String> {
+        let stack = self.derive_stack().await?;
         let branch = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
         let tip = stack
             .branch(&branch)
@@ -725,13 +772,14 @@ impl Engine {
             .unwrap_or_else(|| stack.trunk.clone());
         self.vcs
             .diff(&format!("{}..{}", base.as_str(), tip.as_str()))
+            .await
     }
 
     /// `jjk branch squash [-m M]` — collapse all of the current branch's commits into one.
-    pub fn branch_squash(&mut self, message: Option<&str>) -> Result<Report> {
+    pub async fn branch_squash(&mut self, message: Option<&str>) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let stack = self.derive_stack()?;
+        self.ensure_fresh(&mut report).await?;
+        let stack = self.derive_stack().await?;
         let branch = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
         let b = stack
             .branch(&branch)
@@ -752,17 +800,17 @@ impl Engine {
             Ok(())
         })?;
         report.note(format!("squashed '{branch}' into one commit"));
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 
     /// `jjk branch fold` — fold the current branch into its downstack base: the base's bookmark
     /// advances over the current branch's commits and the current bookmark is dropped (one fewer
     /// PR; the upstack reconnects to the base).
-    pub fn branch_fold(&mut self) -> Result<Report> {
+    pub async fn branch_fold(&mut self) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let stack = self.derive_stack()?;
+        self.ensure_fresh(&mut report).await?;
+        let stack = self.derive_stack().await?;
         let branch = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
         let tip = stack
             .branch(&branch)
@@ -787,15 +835,15 @@ impl Engine {
 
     /// `jjk commit --fixup <target>` — fold the working-copy changes into `target` branch's tip (an
     /// older commit downstack); descendants auto-rebase. (`git commit --fixup` + autosquash.)
-    pub fn commit_fixup(&mut self, target: &str) -> Result<Report> {
+    pub async fn commit_fixup(&mut self, target: &str) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
+        self.ensure_fresh(&mut report).await?;
         if target == self.state.config.trunk {
             return Err(JjkError::IsTrunk(target.to_string()).into());
         }
-        let target_tip = self.branch_tip(target)?;
+        let target_tip = self.branch_tip(target).await?;
         // Snapshot so on-disk edits are captured into @ before folding them down.
-        let wc = self.vcs.snapshot()?;
+        let wc = self.vcs.snapshot().await?;
         if wc.is_empty {
             report.note("nothing to fix up (working copy is clean)");
             return Ok(report);
@@ -803,31 +851,32 @@ impl Engine {
         self.vcs
             .transaction(&mut |tx| tx.squash_working_into(&target_tip))?;
         report.note(format!("fixed up '{target}' with working-copy changes"));
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 
     /// `jjk commit --split` — split the current branch's tip into two commits via an interactive
     /// diff editor (`jj split`); descendants auto-rebase.
-    pub fn commit_split(&mut self) -> Result<Report> {
+    pub async fn commit_split(&mut self) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let (branch, tip) = self.current_branch_tip()?.ok_or(JjkError::NotOnBranch)?;
-        self.vcs.split_interactive(&tip)?;
+        self.ensure_fresh(&mut report).await?;
+        let (branch, tip) = self.current_branch_tip().await?.ok_or(JjkError::NotOnBranch)?;
+        self.vcs.split_interactive(&tip).await?;
         report.note(format!("split the tip of '{branch}'"));
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 
     /// `jjk commit --pick <rev>` — copy a commit (e.g. from an upstack branch) onto the current
     /// branch's tip; the upstack rides along.
-    pub fn commit_pick(&mut self, rev: &str) -> Result<Report> {
+    pub async fn commit_pick(&mut self, rev: &str) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let (branch, tip) = self.current_branch_tip()?.ok_or(JjkError::NotOnBranch)?;
+        self.ensure_fresh(&mut report).await?;
+        let (branch, tip) = self.current_branch_tip().await?.ok_or(JjkError::NotOnBranch)?;
         let src = self
             .vcs
-            .resolve(rev)?
+            .resolve(rev)
+            .await?
             .into_iter()
             .next()
             .ok_or_else(|| JjkError::Msg(format!("no commit matches '{rev}'")))?
@@ -838,7 +887,8 @@ impl Engine {
         // After --insert-after, the copy is the sole new child of the old tip.
         let dup = self
             .vcs
-            .resolve(&format!("children({})", tip.as_str()))?
+            .resolve(&format!("children({})", tip.as_str()))
+            .await?
             .into_iter()
             .next()
             .ok_or_else(|| JjkError::Msg("could not locate the picked commit".into()))?
@@ -847,27 +897,28 @@ impl Engine {
         self.vcs
             .transaction(&mut |tx| tx.set_bookmark(&bname, &dup))?;
         report.note(format!("picked {} onto '{branch}'", src.short()));
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 
     /// `jjk branch split <new> <commit>` — split the current branch at `commit`: a new tracked
     /// branch `<new>` takes the commits up to and including `commit`; the current branch keeps the
     /// rest. (`commit` must be within the branch and below its tip.)
-    pub fn branch_split(&mut self, new_name: &str, at: &str) -> Result<Report> {
+    pub async fn branch_split(&mut self, new_name: &str, at: &str) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let stack = self.derive_stack()?;
+        self.ensure_fresh(&mut report).await?;
+        let stack = self.derive_stack().await?;
         let branch = stack.current.clone().ok_or(JjkError::NotOnBranch)?;
         let b = stack
             .branch(&branch)
             .ok_or_else(|| JjkError::UnknownBranch(branch.clone()))?;
-        if self.resolve_bookmark(new_name)?.is_some() {
+        if self.resolve_bookmark(new_name).await?.is_some() {
             return Err(JjkError::Msg(format!("branch '{new_name}' already exists")).into());
         }
         let at_id = self
             .vcs
-            .resolve(at)?
+            .resolve(at)
+            .await?
             .into_iter()
             .next()
             .ok_or_else(|| JjkError::Msg(format!("no commit matches '{at}'")))?
@@ -894,7 +945,7 @@ impl Engine {
 
     /// `jjk worktree add <path> [name] [--branch B]` — create a jj workspace. The new workspace's
     /// `@` starts as an empty child of `B`'s tip (or trunk). Great for parallel agents per branch.
-    pub fn worktree_add(
+    pub async fn worktree_add(
         &self,
         path: &Path,
         name: Option<&str>,
@@ -910,10 +961,10 @@ impl Engine {
                 .to_string(),
         };
         let at = match branch {
-            Some(b) if b != self.state.config.trunk => self.branch_tip(b)?,
-            _ => self.trunk_anchor()?.1,
+            Some(b) if b != self.state.config.trunk => self.branch_tip(b).await?,
+            _ => self.trunk_anchor().await?.1,
         };
-        self.vcs.add_workspace(path, &name, &at)?;
+        self.vcs.add_workspace(path, &name, &at).await?;
         report.note(format!("added workspace '{name}' at {}", path.display()));
         if let Some(b) = branch {
             report.note(format!("starting on '{b}'"));
@@ -922,10 +973,22 @@ impl Engine {
     }
 
     /// `jjk worktree list` — workspaces with their per-workspace current branch.
-    pub fn worktree_list(&self) -> Result<Vec<WorktreeRow>> {
-        let mut rows = Vec::new();
-        for ws in self.vcs.workspaces()? {
-            let current = self.branch_at(&format!("{}@", ws.name))?;
+    pub async fn worktree_list(&self) -> Result<Vec<WorktreeRow>> {
+        let workspaces = self.vcs.workspaces().await?;
+        // Each workspace's "current branch" is an independent `heads(::<ws>@ & STACK)` read —
+        // resolve them all concurrently (one round-trip instead of one per workspace).
+        let revsets: Vec<String> = workspaces
+            .iter()
+            .map(|ws| format!("heads(::{}@ & {STACK_BOOKMARKS})", ws.name))
+            .collect();
+        let revset_refs: Vec<&str> = revsets.iter().map(String::as_str).collect();
+        let resolved = self.vcs.resolve_many(&revset_refs).await?;
+        let mut rows = Vec::with_capacity(workspaces.len());
+        for (ws, commits) in workspaces.into_iter().zip(resolved) {
+            let current = commits
+                .into_iter()
+                .next()
+                .and_then(|c| c.local_bookmarks.into_iter().find(|b| self.is_stack_bookmark(b)));
             rows.push(WorktreeRow {
                 name: ws.name,
                 working_copy: ws.working_copy,
@@ -937,33 +1000,22 @@ impl Engine {
     }
 
     /// `jjk worktree remove <name>` — stop tracking a workspace (files are left on disk).
-    pub fn worktree_remove(&self, name: &str) -> Result<Report> {
+    pub async fn worktree_remove(&self, name: &str) -> Result<Report> {
         let mut report = Report::default();
-        self.vcs.forget_workspace(name)?;
+        self.vcs.forget_workspace(name).await?;
         report.note(format!("removed workspace '{name}' (files left on disk)"));
         Ok(report)
-    }
-
-    /// Nearest non-trunk local bookmark at-or-below the commit named by `at_revset` (e.g. `ws2@`).
-    fn branch_at(&self, at_revset: &str) -> Result<Option<String>> {
-        let res = self
-            .vcs
-            .resolve(&format!("heads(::{at_revset} & {STACK_BOOKMARKS})"))?;
-        Ok(res
-            .into_iter()
-            .next()
-            .and_then(|c| c.local_bookmarks.into_iter().find(|b| self.is_stack_bookmark(b))))
     }
 
     // ---------------------------------------------------------------- stash (muscle memory; D-§5)
 
     /// `jjk stash` — park the working-copy changes aside on a `jjk/stash/N` bookmark and leave a
     /// clean empty `@` in place. (Mostly unnecessary in jj since switching is safe.)
-    pub fn stash(&mut self) -> Result<Report> {
+    pub async fn stash(&mut self) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
+        self.ensure_fresh(&mut report).await?;
         // Snapshot so on-disk edits are seen before deciding whether there's anything to stash.
-        let wc = self.vcs.snapshot()?;
+        let wc = self.vcs.snapshot().await?;
         if wc.is_empty {
             report.note("nothing to stash (working copy is clean)");
             return Ok(report);
@@ -973,7 +1025,7 @@ impl Engine {
             .first()
             .cloned()
             .ok_or_else(|| JjkError::Msg("working copy has no parent to stash onto".into()))?;
-        let n = self.next_stash_number()?;
+        let n = self.next_stash_number().await?;
         let name = format!("jjk/stash/{n}");
         let wc_id = wc.change_id.clone();
         let name_cl = name.clone();
@@ -987,16 +1039,16 @@ impl Engine {
     }
 
     /// `jjk stash pop` — restore the most recent stash into the current working copy.
-    pub fn stash_pop(&mut self) -> Result<Report> {
+    pub async fn stash_pop(&mut self) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let stashes = self.list_stashes()?;
+        self.ensure_fresh(&mut report).await?;
+        let stashes = self.list_stashes().await?;
         let (name, from) = stashes
             .into_iter()
             .max_by_key(|(_, _, n)| *n)
             .map(|(name, id, _)| (name, id))
             .ok_or_else(|| JjkError::Msg("no stash to pop".into()))?;
-        let into = self.vcs.working_copy()?.change_id;
+        let into = self.vcs.working_copy().await?.change_id;
         let name_cl = name.clone();
         self.vcs.transaction(&mut |tx| {
             tx.squash(&from, &into)?; // restore changes into @ (abandons the now-empty stash)
@@ -1007,9 +1059,9 @@ impl Engine {
         Ok(report)
     }
 
-    fn list_stashes(&self) -> Result<Vec<(String, ChangeId, u64)>> {
+    async fn list_stashes(&self) -> Result<Vec<(String, ChangeId, u64)>> {
         let mut out = Vec::new();
-        for b in self.vcs.bookmarks()? {
+        for b in self.vcs.bookmarks().await? {
             if let Some(rest) = b.name.strip_prefix("jjk/stash/") {
                 if let Ok(n) = rest.parse::<u64>() {
                     out.push((b.name.clone(), b.target, n));
@@ -1019,9 +1071,10 @@ impl Engine {
         Ok(out)
     }
 
-    fn next_stash_number(&self) -> Result<u64> {
+    async fn next_stash_number(&self) -> Result<u64> {
         Ok(self
-            .list_stashes()?
+            .list_stashes()
+            .await?
             .into_iter()
             .map(|(_, _, n)| n)
             .max()
@@ -1034,10 +1087,10 @@ impl Engine {
     /// `jjk resolve` — open the lowest conflicted commit for editing (`jj edit`). The user edits
     /// the files to resolve; the next jjk command re-snapshots and the resolution propagates to
     /// descendants (JJ_NOTES §7). Then `jjk checkout <branch>` restores the empty-`@` invariant.
-    pub fn resolve(&mut self) -> Result<Report> {
+    pub async fn resolve(&mut self) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let stack = self.derive_stack()?;
+        self.ensure_fresh(&mut report).await?;
+        let stack = self.derive_stack().await?;
         // Lowest conflicted commit across the stack (bottom→top).
         let target = stack
             .branches
@@ -1066,8 +1119,8 @@ impl Engine {
     /// which leaves the repo half-changed. We snapshot the head op id (and jjk's own state.toml)
     /// here and `jj op restore` to it in [`undo`]. Best-effort: a failure must never block the real
     /// command, so callers ignore the error (undo then falls back to a single `jj undo`).
-    pub fn checkpoint(&self) -> Result<()> {
-        let op_id = self.vcs.current_op_id()?;
+    pub async fn checkpoint(&self) -> Result<()> {
+        let op_id = self.vcs.current_op_id().await?;
         let state = std::fs::read_to_string(State::path_for(&self.root)).unwrap_or_default();
         let mut stack = self.load_checkpoints();
         stack.push(Checkpoint { op_id, state });
@@ -1102,12 +1155,12 @@ impl Engine {
     /// `jjk undo` — revert the last jjk command as one unit. Pops the most recent checkpoint and
     /// `jj op restore`s to it (also restoring jjk's state.toml). With no checkpoint recorded (e.g.
     /// the change predates this feature), falls back to a single `jj undo`.
-    pub fn undo(&mut self) -> Result<Report> {
+    pub async fn undo(&mut self) -> Result<Report> {
         let mut report = Report::default();
         let mut stack = self.load_checkpoints();
         let msg = match stack.pop() {
             Some(ckpt) => {
-                let msg = self.vcs.restore_op(&ckpt.op_id)?;
+                let msg = self.vcs.restore_op(&ckpt.op_id).await?;
                 // Restore jjk's own state alongside the jj repo so the two don't drift.
                 if !ckpt.state.is_empty() {
                     std::fs::write(State::path_for(&self.root), &ckpt.state)?;
@@ -1116,7 +1169,7 @@ impl Engine {
                 self.save_checkpoints(&stack)?;
                 msg
             }
-            None => self.vcs.undo()?,
+            None => self.vcs.undo().await?,
         };
         for line in msg.lines() {
             report.note(line.to_string());
@@ -1127,8 +1180,8 @@ impl Engine {
     // ---------------------------------------------------------------- conflict surfacing
 
     /// Append a git-flavored conflict summary for the current stack (ARCH §9 D4).
-    fn collect_conflicts(&self, report: &mut Report) -> Result<()> {
-        let stack = self.derive_stack()?;
+    async fn collect_conflicts(&self, report: &mut Report) -> Result<()> {
+        let stack = self.derive_stack().await?;
         for b in &stack.branches {
             if b.has_conflict() {
                 let n = b.commits.iter().filter(|c| c.has_conflict).count();
@@ -1143,39 +1196,42 @@ impl Engine {
     }
 
     /// Whether the current stack has any conflicts (for exit-code / messaging).
-    pub fn has_conflicts(&self) -> Result<bool> {
-        Ok(self.derive_stack()?.branches.iter().any(|b| b.has_conflict()))
+    pub async fn has_conflicts(&self) -> Result<bool> {
+        Ok(self.derive_stack().await?.branches.iter().any(|b| b.has_conflict()))
     }
 
     // ---------------------------------------------------------------- remote passthrough (Phase 3 wires forge)
 
-    pub fn fetch(&self) -> Result<Report> {
+    pub async fn fetch(&self) -> Result<Report> {
         let mut report = Report::default();
         self.vcs
-            .fetch(&self.state.config.remote, Some(&self.state.config.trunk))?;
+            .fetch(&self.state.config.remote, Some(&self.state.config.trunk))
+            .await?;
         report.note(format!("fetched {}", self.state.config.remote));
         Ok(report)
     }
 
-    pub fn push_current(&mut self) -> Result<Report> {
+    pub async fn push_current(&mut self) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let branch = self.current_branch()?.ok_or(JjkError::NotOnBranch)?;
+        self.ensure_fresh(&mut report).await?;
+        let branch = self.current_branch().await?.ok_or(JjkError::NotOnBranch)?;
         self.vcs
-            .push(&self.state.config.remote, &branch, PushOpts::default())?;
+            .push(&self.state.config.remote, &branch, PushOpts::default())
+            .await?;
         report.note(format!("pushed {branch}"));
         Ok(report)
     }
 
     /// `jjk pull` — fetch trunk and rebase the current stack onto it. **No** merged-PR detection
     /// (that's `sync`). The local trunk bookmark fast-forwards on fetch (JJ_NOTES §9).
-    pub fn pull(&mut self) -> Result<Report> {
+    pub async fn pull(&mut self) -> Result<Report> {
         let mut report = Report::default();
         self.vcs
-            .fetch(&self.state.config.remote, Some(&self.state.config.trunk))?;
+            .fetch(&self.state.config.remote, Some(&self.state.config.trunk))
+            .await?;
         report.note(format!("fetched {}", self.state.config.remote));
-        self.ensure_fresh(&mut report)?;
-        let moved = self.rebase_stack_onto_trunk()?;
+        self.ensure_fresh(&mut report).await?;
+        let moved = self.rebase_stack_onto_trunk().await?;
         if moved > 0 {
             report.note(format!(
                 "rebased {moved} stack {} onto trunk",
@@ -1184,7 +1240,7 @@ impl Engine {
         } else {
             report.note("stack already on latest trunk");
         }
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 
@@ -1196,14 +1252,14 @@ impl Engine {
     /// No-op when there's no local trunk bookmark (the `trunk()` fallback already follows the
     /// remote), when it's already current, or when the move wouldn't be a fast-forward (so a
     /// divergent local trunk is never clobbered).
-    fn advance_trunk_to_remote(&self, report: &mut Report) -> Result<()> {
+    async fn advance_trunk_to_remote(&self, report: &mut Report) -> Result<()> {
         let trunk = self.state.config.trunk.clone();
         let remote = self.state.config.remote.clone();
-        let Some(local_id) = self.resolve_bookmark(&trunk)? else {
+        let Some(local_id) = self.resolve_bookmark(&trunk).await? else {
             return Ok(());
         };
         let remote_ref = format!("{trunk}@{remote}");
-        let Some(remote_tip) = self.vcs.resolve(&remote_ref)?.into_iter().next() else {
+        let Some(remote_tip) = self.vcs.resolve(&remote_ref).await?.into_iter().next() else {
             return Ok(()); // remote trunk not fetched (e.g. brand-new repo)
         };
         if remote_tip.change_id == local_id {
@@ -1212,7 +1268,8 @@ impl Engine {
         // Only advance if the local trunk is an ancestor of the fetched remote trunk.
         let is_fast_forward = self
             .vcs
-            .resolve(&format!("{} & ancestors({remote_ref})", local_id.as_str()))?
+            .resolve(&format!("{} & ancestors({remote_ref})", local_id.as_str()))
+            .await?
             .iter()
             .any(|c| c.change_id == local_id);
         if !is_fast_forward {
@@ -1225,20 +1282,23 @@ impl Engine {
         Ok(())
     }
 
-    fn rebase_stack_onto_trunk(&self) -> Result<usize> {
-        let (trunk_revset, trunk_id) = self.trunk_anchor()?;
-        let stack = self.derive_stack()?;
+    async fn rebase_stack_onto_trunk(&self) -> Result<usize> {
+        let (trunk_revset, trunk_id) = self.trunk_anchor().await?;
+        let stack = self.derive_stack().await?;
         let Some(top) = stack.top() else {
             return Ok(0);
         };
         // Only rebase MUTABLE roots. Immutable commits (already merged / shared) are part of
         // trunk's world; jj refuses to rewrite them, and we don't need to (a branch built atop a
         // previously-merged stack rebases its own mutable commits straight onto trunk).
-        let roots = self.vcs.resolve(&format!(
-            "roots(({}..{}) & mutable())",
-            trunk_revset,
-            top.tip.as_str()
-        ))?;
+        let roots = self
+            .vcs
+            .resolve(&format!(
+                "roots(({}..{}) & mutable())",
+                trunk_revset,
+                top.tip.as_str()
+            ))
+            .await?;
         if roots.is_empty() {
             return Ok(0);
         }
@@ -1265,11 +1325,11 @@ impl Engine {
     /// otherwise open it in the browser and return `None`. Errors if not on a branch, or the branch
     /// has no submitted PR.
     pub async fn pr_view(&self, print: bool) -> Result<Option<String>> {
-        let branch = self.current_branch()?.ok_or(JjkError::NotOnBranch)?;
+        let branch = self.current_branch().await?.ok_or(JjkError::NotOnBranch)?;
         let pr = self.state.pr_of(&branch).ok_or_else(|| {
             JjkError::Msg(format!("no PR for '{branch}' yet — run `jjk submit` first"))
         })?;
-        self.forge()?.view_pr(pr, !print).await
+        self.forge().await?.view_pr(pr, !print).await
     }
 
     /// `jjk submit` — push tracked branches bottom-up and create/update their PRs with correct
@@ -1283,12 +1343,12 @@ impl Engine {
     /// yet) the installed [`Prompter`] gathers the title/body/draft; existing PRs are just updated.
     pub async fn submit_with(&mut self, scope: SubmitScope, opts: SubmitOptions) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report)?;
-        let stack = self.derive_stack()?;
+        self.ensure_fresh(&mut report).await?;
+        let stack = self.derive_stack().await?;
         let remote = self.state.config.remote.clone();
         let trunk_name = stack.trunk_name.clone();
         // Easter egg: a user can opt a PR-body flourish in via their jj config (undocumented).
-        let yuji = self.vcs.config_get(YUJI_KEY)?.as_deref() == Some(YUJI_VALUE);
+        let yuji = self.vcs.config_get(YUJI_KEY).await?.as_deref() == Some(YUJI_VALUE);
 
         // Full tracked list (bottom→top) with correct bases. Bases come from the *whole* stack —
         // a subset submit still bases each PR on its real downstack branch, not the subset.
@@ -1344,7 +1404,7 @@ impl Engine {
         // per-call query (by head, newest, any state) is unchanged. Doing them up front also fails
         // before any push if the forge is unreachable. Results stay aligned with `to_submit`.
         let existing: Vec<Option<PrRef>> = {
-            let forge = self.forge()?;
+            let forge = self.forge().await?;
             futures::future::try_join_all(to_submit.iter().map(|&i| forge.get_pr(&plan[i].name)))
                 .await?
         };
@@ -1358,7 +1418,7 @@ impl Engine {
             let item = &plan[i];
             // Only push when the branch actually moved — don't re-push an unchanged branch.
             if !item.on_remote {
-                self.vcs.push(&remote, &item.name, PushOpts::default())?;
+                self.vcs.push(&remote, &item.name, PushOpts::default()).await?;
             }
             let number = match &existing[slot] {
                 Some(pr) => {
@@ -1366,7 +1426,7 @@ impl Engine {
                     // Retarget the base only when it actually changed — never the body, so we don't
                     // clobber the author's description, and we skip a no-op API call on re-submit.
                     if pr.base != item.base {
-                        self.forge()?.update_pr(pr_num, Some(&item.base)).await?;
+                        self.forge().await?.update_pr(pr_num, Some(&item.base)).await?;
                         report.note(format!(
                             "updated #{pr_num} {} (base {})",
                             item.name, item.base
@@ -1385,7 +1445,8 @@ impl Engine {
                         continue;
                     };
                     let pr = self
-                        .forge()?
+                        .forge()
+                        .await?
                         .create_pr(&item.name, &item.base, &d.title, &d.body, d.draft)
                         .await?;
                     let kind = if d.draft { "draft " } else { "" };
@@ -1452,7 +1513,7 @@ impl Engine {
         if prs.len() < 2 {
             return Ok(Vec::new());
         }
-        let forge = self.forge()?;
+        let forge = self.forge().await?;
         let tasks = prs.iter().enumerate().map(|(idx, (_, pr))| {
             let pr = *pr;
             let body = nav_comment_body(prs, idx, yuji);
@@ -1515,8 +1576,8 @@ impl Engine {
 
         // 1. Capture branch→PR BEFORE fetching: a merge-commit landing absorbs the merged branch
         // into trunk on fetch, after which it no longer appears in the derived stack (JJ_NOTES §9b).
-        self.ensure_fresh(&mut report)?;
-        let pre = self.derive_stack()?;
+        self.ensure_fresh(&mut report).await?;
+        let pre = self.derive_stack().await?;
         let candidates: Vec<(String, u64)> = pre
             .branches
             .iter()
@@ -1528,13 +1589,14 @@ impl Engine {
         // would stay behind and the stack wouldn't rebase onto the new trunk (it only moves the
         // remote-tracking `trunk@remote`). Then query merged-state.
         self.vcs
-            .fetch(&self.state.config.remote, Some(&self.state.config.trunk))?;
+            .fetch(&self.state.config.remote, Some(&self.state.config.trunk))
+            .await?;
         report.note(format!("fetched {}", self.state.config.remote));
-        self.advance_trunk_to_remote(&mut report)?;
+        self.advance_trunk_to_remote(&mut report).await?;
         // Query merged-state for all candidate PRs concurrently (independent reads by PR number) —
         // one round-trip instead of N. Order is preserved by zipping back onto `candidates`.
         let merged_flags = {
-            let forge = self.forge()?;
+            let forge = self.forge().await?;
             futures::future::try_join_all(candidates.iter().map(|(_, pr)| forge.is_merged(*pr)))
                 .await?
         };
@@ -1553,7 +1615,7 @@ impl Engine {
         // 3. Rebase the whole stack onto the (advanced) trunk. In the squash case the merged
         // branch's commits become empty; in the merge-commit case they're already in trunk's
         // ancestry (immutable) and are left untouched.
-        let moved = self.rebase_stack_onto_trunk()?;
+        let moved = self.rebase_stack_onto_trunk().await?;
         if moved > 0 {
             report.note(format!(
                 "rebased {moved} stack {} onto trunk",
@@ -1562,7 +1624,7 @@ impl Engine {
         }
 
         // 4. Reconcile each merged branch.
-        let post = self.derive_stack()?;
+        let post = self.derive_stack().await?;
         for name in &merged_names {
             match post.branch(name) {
                 // Squash landing: the branch is now empty & mutable above trunk → abandon it,
@@ -1576,7 +1638,7 @@ impl Engine {
                 // Merge-commit landing: the branch's commit is an ancestor of trunk (immutable);
                 // nothing to abandon — just drop the (now redundant) local bookmark.
                 None => {
-                    if self.vcs.bookmarks()?.iter().any(|bm| bm.name == *name) {
+                    if self.vcs.bookmarks().await?.iter().any(|bm| bm.name == *name) {
                         let n = name.clone();
                         self.vcs.transaction(&mut |tx| tx.delete_bookmark(&n))?;
                     }
@@ -1587,8 +1649,8 @@ impl Engine {
         }
 
         // 5. Recover the current workspace if a rewrite left it stale (cross-workspace: Phase 5).
-        if self.vcs.is_stale().unwrap_or(false) {
-            self.vcs.update_stale()?;
+        if self.vcs.is_stale().await.unwrap_or(false) {
+            self.vcs.update_stale().await?;
             report.note("recovered stale working copy");
         }
 
@@ -1598,14 +1660,14 @@ impl Engine {
             report.note("synced local state only (--no-push); run `jjk sync` to push & retarget");
         } else {
             let remote = self.state.config.remote.clone();
-            let survivors = self.derive_stack()?;
+            let survivors = self.derive_stack().await?;
             let trunk_name = survivors.trunk_name.clone();
 
             // Prefetch each pushable branch's PR record concurrently (read-only) so the sequential
             // push/retarget pass below doesn't pay a `gh pr list` round-trip per branch. Same query
             // as before (by head); conflicted branches are skipped anyway, so don't fetch them.
             let pr_by_head: std::collections::HashMap<String, Option<PrRef>> = {
-                let forge = self.forge()?;
+                let forge = self.forge().await?;
                 let names: Vec<String> = survivors
                     .branches
                     .iter()
@@ -1632,7 +1694,7 @@ impl Engine {
                 // every sync is wasteful (and a no-op force-push). After a rebase the tip is a new
                 // commit, so this pushes; an untouched branch is skipped.
                 if !tip_on_remote(b, &remote) {
-                    self.vcs.push(&remote, &b.name, PushOpts::default())?;
+                    self.vcs.push(&remote, &b.name, PushOpts::default()).await?;
                     report.note(format!("pushed {}", b.name));
                 }
                 let base = prev_tracked.clone().unwrap_or_else(|| trunk_name.clone());
@@ -1642,7 +1704,7 @@ impl Engine {
                     // can't retarget a closed PR, so report).
                     match pr_by_head.get(&b.name).cloned().flatten() {
                         Some(p) if p.state == PrState::Open && p.base != base => {
-                            self.forge()?.update_pr(pr, Some(&base)).await?;
+                            self.forge().await?.update_pr(pr, Some(&base)).await?;
                             report.note(format!("#{pr} {} → base {base}", b.name));
                         }
                         Some(p) if p.state != PrState::Open => report.note(format!(
@@ -1656,7 +1718,7 @@ impl Engine {
             }
             // Best-effort: propagate merged-branch deletions to the remote.
             if !merged_names.is_empty() {
-                let _ = self.vcs.push_deleted(&remote);
+                let _ = self.vcs.push_deleted(&remote).await;
             }
 
             // Refresh the stack-navigation comments for the (now reconciled) surviving stack. sync
@@ -1668,12 +1730,12 @@ impl Engine {
                 .filter(|b| b.tracked)
                 .filter_map(|b| b.pr.map(|pr| (b.name.clone(), pr)))
                 .collect();
-            let yuji = self.vcs.config_get(YUJI_KEY)?.as_deref() == Some(YUJI_VALUE);
+            let yuji = self.vcs.config_get(YUJI_KEY).await?.as_deref() == Some(YUJI_VALUE);
             self.refresh_nav_comments(&stack_prs, yuji).await?;
         }
 
         self.state.save(&self.root)?;
-        self.collect_conflicts(&mut report)?;
+        self.collect_conflicts(&mut report).await?;
         Ok(report)
     }
 }

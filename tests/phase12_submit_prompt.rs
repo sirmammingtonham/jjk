@@ -43,22 +43,22 @@ impl Prompter for DecliningPrompter {
     }
 }
 
-fn one_branch(h: &mut common::RepoWithRemote) {
+async fn one_branch(h: &mut common::RepoWithRemote) {
     let root = h.repo.path().to_path_buf();
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "a\n");
-    h.engine.commit("feat-a: first").unwrap();
+    h.engine.commit("feat-a: first").await.unwrap();
 }
 
 /// A two-branch stack (so the stack-navigation comment is created).
-fn two_branches(h: &mut common::RepoWithRemote) {
+async fn two_branches(h: &mut common::RepoWithRemote) {
     let root = h.repo.path().to_path_buf();
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "a\n");
-    h.engine.commit("feat-a: first").unwrap();
-    h.engine.branch_create("feat-b", true).unwrap();
+    h.engine.commit("feat-a: first").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
     write(&root, "b.txt", "b\n");
-    h.engine.commit("feat-b: first").unwrap();
+    h.engine.commit("feat-b: first").await.unwrap();
 }
 
 fn jj_config_set(root: &Path, key: &str, value: &str) {
@@ -74,8 +74,8 @@ fn jj_config_set(root: &Path, key: &str, value: &str) {
 
 #[tokio::test]
 async fn prompts_only_for_new_prs_and_uses_the_prompted_values() {
-    let mut h = setup_with_remote();
-    one_branch(&mut h);
+    let mut h = setup_with_remote().await;
+    one_branch(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
@@ -96,7 +96,7 @@ async fn prompts_only_for_new_prs_and_uses_the_prompted_values() {
 
     // Re-submit: the PR now exists, so it is updated *without* prompting again.
     write(h.repo.path(), "a.txt", "a\nmore\n");
-    h.engine.commit("feat-a: more").unwrap();
+    h.engine.commit("feat-a: more").await.unwrap();
     h.engine.submit(SubmitScope::Stack).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1, "existing PR is not re-prompted");
     assert_eq!(fake.count(), 1, "no duplicate PR");
@@ -104,8 +104,8 @@ async fn prompts_only_for_new_prs_and_uses_the_prompted_values() {
 
 #[tokio::test]
 async fn declining_the_prompt_skips_pr_creation() {
-    let mut h = setup_with_remote();
-    one_branch(&mut h);
+    let mut h = setup_with_remote().await;
+    one_branch(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
@@ -120,8 +120,8 @@ async fn declining_the_prompt_skips_pr_creation() {
 
 #[tokio::test]
 async fn draft_option_fills_through_the_default_prompter() {
-    let mut h = setup_with_remote();
-    one_branch(&mut h);
+    let mut h = setup_with_remote().await;
+    one_branch(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
@@ -139,8 +139,8 @@ async fn yuji_easter_egg_appends_to_nav_comment_only_when_configured() {
 
     // Control: without the config, neither the nav comment nor the body carries the flourish.
     {
-        let mut h = setup_with_remote();
-        two_branches(&mut h);
+        let mut h = setup_with_remote().await;
+        two_branches(&mut h).await;
         let fake = Arc::new(FakeForge::new());
         h.engine.set_forge(Box::new(SharedForge(fake.clone())));
         h.engine.submit(SubmitScope::Stack).await.unwrap();
@@ -157,9 +157,9 @@ async fn yuji_easter_egg_appends_to_nav_comment_only_when_configured() {
 
     // Opt in via jj config → the flourish lands in the stack-navigation comment (not the body).
     {
-        let mut h = setup_with_remote();
+        let mut h = setup_with_remote().await;
         jj_config_set(h.repo.path(), "yuji", "it_doesnt_matter");
-        two_branches(&mut h);
+        two_branches(&mut h).await;
         let fake = Arc::new(FakeForge::new());
         h.engine.set_forge(Box::new(SharedForge(fake.clone())));
         h.engine.submit(SubmitScope::Stack).await.unwrap();

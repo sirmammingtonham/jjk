@@ -11,14 +11,14 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-fn two_branch_stack(h: &mut RepoWithRemote) {
+async fn two_branch_stack(h: &mut RepoWithRemote) {
     let root = h.repo.path().to_path_buf();
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "a\n");
-    h.engine.commit("feat-a: first").unwrap();
-    h.engine.branch_create("feat-b", true).unwrap();
+    h.engine.commit("feat-a: first").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
     write(&root, "b.txt", "b\n");
-    h.engine.commit("feat-b: first").unwrap();
+    h.engine.commit("feat-b: first").await.unwrap();
 }
 
 fn jj_config_set(root: &Path, key: &str, value: &str) {
@@ -35,8 +35,8 @@ fn jj_config_set(root: &Path, key: &str, value: &str) {
 #[tokio::test]
 async fn sync_adds_the_flourish_configured_after_the_initial_submit() {
     let needle = "yuji-itadori-son.png";
-    let mut h = setup_with_remote();
-    two_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    two_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
@@ -62,8 +62,8 @@ async fn sync_adds_the_flourish_configured_after_the_initial_submit() {
 
 #[tokio::test]
 async fn sync_refreshes_nav_comments_without_duplicating() {
-    let mut h = setup_with_remote();
-    two_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    two_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
     h.engine.submit(SubmitScope::Stack).await.unwrap();

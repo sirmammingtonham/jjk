@@ -9,20 +9,20 @@ use common::{setup_with_remote, write, FakeForge, RepoWithRemote, SharedForge};
 use jjk::engine::SubmitScope;
 use std::sync::Arc;
 
-fn two_branch_stack(h: &mut RepoWithRemote) {
+async fn two_branch_stack(h: &mut RepoWithRemote) {
     let root = h.repo.path().to_path_buf();
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "a\n");
-    h.engine.commit("feat-a: first").unwrap();
-    h.engine.branch_create("feat-b", true).unwrap();
+    h.engine.commit("feat-a: first").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
     write(&root, "b.txt", "b\n");
-    h.engine.commit("feat-b: first").unwrap();
+    h.engine.commit("feat-b: first").await.unwrap();
 }
 
 #[tokio::test]
 async fn comment_id_is_cached_and_reused_to_skip_find() {
-    let mut h = setup_with_remote();
-    two_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    two_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
@@ -37,7 +37,7 @@ async fn comment_id_is_cached_and_reused_to_skip_find() {
 
     // Second submit: cached ids let it update in place — NO new find_comment calls.
     write(h.repo.path(), "a.txt", "a\nmore\n");
-    h.engine.commit("feat-a: more").unwrap();
+    h.engine.commit("feat-a: more").await.unwrap();
     h.engine.submit(SubmitScope::Stack).await.unwrap();
 
     assert_eq!(
@@ -52,8 +52,8 @@ async fn comment_id_is_cached_and_reused_to_skip_find() {
 
 #[tokio::test]
 async fn stale_cached_comment_id_self_heals() {
-    let mut h = setup_with_remote();
-    two_branch_stack(&mut h);
+    let mut h = setup_with_remote().await;
+    two_branch_stack(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
     h.engine.submit(SubmitScope::Stack).await.unwrap();

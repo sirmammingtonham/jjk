@@ -7,17 +7,17 @@ use common::{setup_with_remote, write, FakeForge, RepoWithRemote, SharedForge};
 use jjk::engine::SubmitScope;
 use std::sync::Arc;
 
-fn one_branch(h: &mut RepoWithRemote) {
+async fn one_branch(h: &mut RepoWithRemote) {
     let root = h.repo.path().to_path_buf();
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "a\n");
-    h.engine.commit("feat-a: first").unwrap();
+    h.engine.commit("feat-a: first").await.unwrap();
 }
 
 #[tokio::test]
 async fn pr_view_print_returns_the_url() {
-    let mut h = setup_with_remote();
-    one_branch(&mut h);
+    let mut h = setup_with_remote().await;
+    one_branch(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
     h.engine.submit(SubmitScope::Stack).await.unwrap();
@@ -32,8 +32,8 @@ async fn pr_view_print_returns_the_url() {
 
 #[tokio::test]
 async fn pr_view_opens_browser_by_default() {
-    let mut h = setup_with_remote();
-    one_branch(&mut h);
+    let mut h = setup_with_remote().await;
+    one_branch(&mut h).await;
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
     h.engine.submit(SubmitScope::Stack).await.unwrap();
@@ -46,8 +46,8 @@ async fn pr_view_opens_browser_by_default() {
 
 #[tokio::test]
 async fn pr_view_errors_when_branch_has_no_pr() {
-    let mut h = setup_with_remote();
-    one_branch(&mut h); // tracked branch, but never submitted
+    let mut h = setup_with_remote().await;
+    one_branch(&mut h).await; // tracked branch, but never submitted
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
@@ -57,11 +57,11 @@ async fn pr_view_errors_when_branch_has_no_pr() {
 
 #[tokio::test]
 async fn pr_view_errors_when_not_on_a_branch() {
-    let mut h = setup_with_remote();
+    let mut h = setup_with_remote().await;
     // On trunk, not on any stacked branch.
     let fake = Arc::new(FakeForge::new());
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
 
-    assert!(h.engine.current_branch().unwrap().is_none(), "precondition: on trunk");
+    assert!(h.engine.current_branch().await.unwrap().is_none(), "precondition: on trunk");
     assert!(h.engine.pr_view(true).await.is_err(), "should error when not on a branch");
 }

@@ -44,18 +44,18 @@ async fn seeded_stack(h: &mut RepoWithRemote, fake: &Arc<FakeForge>) {
             Ok(())
         })
         .unwrap();
-    h.engine.vcs().push("origin", "main", PushOpts::default()).unwrap();
+    h.engine.vcs().push("origin", "main", PushOpts::default()).await.unwrap();
 
     // Simulate a repo whose local trunk bookmark does NOT track the remote (so plain fetch won't
     // advance it) — the condition under which the stack failed to rebase.
     jj(&root, &["bookmark", "untrack", "main@origin"]);
 
-    h.engine.branch_create("feat-a", true).unwrap();
+    h.engine.branch_create("feat-a", true).await.unwrap();
     write(&root, "a.txt", "a\n");
-    h.engine.commit("feat-a: first").unwrap();
-    h.engine.branch_create("feat-b", true).unwrap();
+    h.engine.commit("feat-a: first").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
     write(&root, "b.txt", "b\n");
-    h.engine.commit("feat-b: first").unwrap();
+    h.engine.commit("feat-b: first").await.unwrap();
 
     h.engine.set_forge(Box::new(SharedForge(fake.clone())));
     h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
@@ -77,18 +77,18 @@ fn advance_trunk_externally(h: &RepoWithRemote) {
 
 #[tokio::test]
 async fn sync_no_push_rebases_stack_onto_advanced_trunk() {
-    let mut h = setup_with_remote();
+    let mut h = setup_with_remote().await;
     let fake = Arc::new(FakeForge::new());
     seeded_stack(&mut h, &fake).await;
 
-    let trunk_before = h.engine.derive_stack().unwrap().trunk;
+    let trunk_before = h.engine.derive_stack().await.unwrap().trunk;
     let bare = h.remote.path().join("origin.git");
     let feat_a_remote_before = remote_sha(&bare, "feat-a");
 
     advance_trunk_externally(&h);
     h.engine.sync(false).await.unwrap();
 
-    let after = h.engine.derive_stack().unwrap();
+    let after = h.engine.derive_stack().await.unwrap();
     assert_ne!(after.trunk, trunk_before, "trunk should advance to the fetched remote position");
     assert!(
         after.branch("feat-a").unwrap().commits[0].parents.contains(&after.trunk),
@@ -102,7 +102,7 @@ async fn sync_no_push_rebases_stack_onto_advanced_trunk() {
 
 #[tokio::test]
 async fn sync_does_not_repush_unchanged_branches() {
-    let mut h = setup_with_remote();
+    let mut h = setup_with_remote().await;
     let fake = Arc::new(FakeForge::new());
     seeded_stack(&mut h, &fake).await;
 
@@ -117,7 +117,7 @@ async fn sync_does_not_repush_unchanged_branches() {
 
 #[tokio::test]
 async fn resubmit_does_not_repush_unchanged_branches() {
-    let mut h = setup_with_remote();
+    let mut h = setup_with_remote().await;
     let fake = Arc::new(FakeForge::new());
     seeded_stack(&mut h, &fake).await; // already submitted once
 
@@ -133,18 +133,18 @@ async fn resubmit_does_not_repush_unchanged_branches() {
 
 #[tokio::test]
 async fn sync_push_rebases_then_pushes_onto_advanced_trunk() {
-    let mut h = setup_with_remote();
+    let mut h = setup_with_remote().await;
     let fake = Arc::new(FakeForge::new());
     seeded_stack(&mut h, &fake).await;
 
-    let trunk_before = h.engine.derive_stack().unwrap().trunk;
+    let trunk_before = h.engine.derive_stack().await.unwrap().trunk;
     let bare = h.remote.path().join("origin.git");
     let feat_a_remote_before = remote_sha(&bare, "feat-a");
 
     advance_trunk_externally(&h);
     h.engine.sync(true).await.unwrap();
 
-    let after = h.engine.derive_stack().unwrap();
+    let after = h.engine.derive_stack().await.unwrap();
     assert_ne!(after.trunk, trunk_before, "trunk advanced");
     assert!(after.branch("feat-a").unwrap().commits[0].parents.contains(&after.trunk));
     // With push, the rebased branch is force-pushed.

@@ -41,7 +41,7 @@ pub struct RepoWithRemote {
     pub engine: Engine,
 }
 
-pub fn setup_with_remote() -> RepoWithRemote {
+pub async fn setup_with_remote() -> RepoWithRemote {
     init_identity();
     let remote = tempfile::tempdir().unwrap();
     let remote_path = remote.path().join("origin.git");
@@ -54,11 +54,14 @@ pub fn setup_with_remote() -> RepoWithRemote {
     assert!(ok, "git init --bare failed");
 
     let repo = tempfile::tempdir().unwrap();
-    Engine::repo_init(repo.path(), Some("main".into()), Some("origin".into())).unwrap();
+    Engine::repo_init(repo.path(), Some("main".into()), Some("origin".into()))
+        .await
+        .unwrap();
     let engine = Engine::open(repo.path()).unwrap();
     engine
         .vcs()
         .add_remote("origin", remote_path.to_str().unwrap())
+        .await
         .unwrap();
 
     RepoWithRemote {
