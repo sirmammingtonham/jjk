@@ -1,7 +1,7 @@
-//! Problem C: the stack-navigation comment should be posted right after each PR opens (so it's
-//! likely the first comment, before CI bots), and earlier PRs updated as the stack grows — rather
-//! than deferring all comments to a single pass after every PR is open. This asserts the comment
-//! posting is *interleaved* with PR creation.
+//! Navigation-comment timing follows git-spice's two-phase model: open every PR first, then post
+//! all nav comments in a single pass once every PR number is known — so each comment is written
+//! correct the first time (no placeholder/renumber step). This asserts comments are NOT interleaved
+//! with PR creation: every PR is opened before any nav comment is posted.
 
 mod common;
 
@@ -23,7 +23,7 @@ fn three_branch_stack(h: &mut RepoWithRemote) {
 }
 
 #[tokio::test]
-async fn nav_comments_are_posted_while_the_stack_is_still_opening() {
+async fn nav_comments_are_posted_after_all_prs_open() {
     let mut h = setup_with_remote();
     three_branch_stack(&mut h);
     let fake = Arc::new(FakeForge::new());
@@ -36,12 +36,11 @@ async fn nav_comments_are_posted_while_the_stack_is_still_opening() {
     let last_pr = events.iter().rposition(|e| e.starts_with("create_pr:"));
     let (first_comment, last_pr) = (first_comment.unwrap(), last_pr.unwrap());
 
-    // A nav comment is posted before the final PR is even created — i.e. comments are interleaved
-    // with opening PRs, not deferred until the whole stack is open. (Old behavior: every
-    // create_comment came after every create_pr.)
+    // Two-phase like git-spice: every PR is opened before any nav comment is posted, so each
+    // comment carries the full, correct set of PR numbers on its first write.
     assert!(
-        first_comment < last_pr,
-        "expected a nav comment before the last PR opens; events: {events:?}"
+        last_pr < first_comment,
+        "all PRs should open before any nav comment is posted; events: {events:?}"
     );
 
     // Sanity: still exactly one comment per PR, no duplicates.
