@@ -1,9 +1,16 @@
 //! The `Vcs` **port** (trait) — defined in terms of the domain operations the engine needs,
-//! never in terms of any backend. No `jj-lib` type and no CLI/JSON shape appears here.
+//! never in terms of any backend. No `jj-lib` type appears here.
 //!
-//! Adapters live in submodules (`jj_cli` binary today; `jj_lib` crate later).
+//! The sole adapter is [`jj_lib`], which links the `jj-lib` crate and runs in-process: a whole
+//! jjk command loads the repo once and groups its mutations into a single jj-lib transaction
+//! (atomic, one op-log entry) instead of spawning a `jj` subprocess per step.
+//!
+//! **Everything is `async`.** Reads can be fanned out concurrently (see
+//! [`resolve_many`](Vcs::resolve_many)); a command's mutations run inside an async
+//! [`VcsTx`] obtained from [`begin_transaction`](Vcs::begin_transaction) and finalized with
+//! [`VcsTx::commit`].
 
-pub mod jj_cli;
+pub mod jj_lib;
 
 use crate::error::Result;
 use crate::model::{Bookmark, Capabilities, ChangeId, CommitInfo, WorkspaceInfo};
@@ -30,17 +37,16 @@ pub enum CommitScope {
     Interactive,
 }
 
-/// The VCS port. Read methods are direct; mutations are grouped inside [`Vcs::transaction`] so a
-/// backend may make them atomic. The binary adapter runs each mutation as one `jj` invocation and
-/// reports `atomic_transactions: false`.
+/// The VCS port. Reads are direct; a command's mutations are grouped inside a [`VcsTx`] obtained
+/// from [`begin_transaction`](Vcs::begin_transaction), then finalized with [`VcsTx::commit`] — the
+/// `jj_lib` adapter maps that to one atomic jj-lib transaction.
 ///
-/// **Reads are `async`** (driven by `tokio::process` in the binary adapter) so the engine can fan
-/// out *independent* reads concurrently — see [`resolve_many`](Vcs::resolve_many). Mutations stay
-/// synchronous: a jjk command performs a single serial sequence of `jj` ops, so there is no
-/// concurrency to exploit there, and keeping [`transaction`](Vcs::transaction) sync avoids
-/// threading async closures through every call site.
-#[async_trait]
-pub trait Vcs: Send + Sync {
+/// Everything is `async`. The futures are not required to be `Send` (`#[async_trait(?Send)]`)
+/// because jj-lib's in-memory repo/transaction handles are not `Sync` and jjk never spawns a
+/// command's work onto another thread — it drives one command to completion on the current
+/// runtime. The adapter itself is `Send` (its mutable state lives behind interior mutability).
+#[async_trait(?Send)]
+pub trait Vcs: Send {
     fn capabilities(&self) -> Capabilities;
 
     // ---- queries ----
@@ -114,11 +120,10 @@ pub trait Vcs: Send + Sync {
 
     // ---- mutations (grouped) ----
 
-    /// Run a sequence of mutations. The binary adapter executes them sequentially (best effort,
-    /// non-atomic); the crate adapter maps it to a single jj-lib transaction. Synchronous: the
-    /// mutations are an ordered, dependent sequence (one `jj` op at a time) with no concurrency to
-    /// exploit.
-    fn transaction(&self, f: &mut dyn FnMut(&mut dyn VcsTx) -> Result<()>) -> Result<()>;
+    /// Begin a transaction. Issue the command's mutations on the returned handle, then call
+    /// [`VcsTx::commit`] to finalize them (the `jj_lib` adapter applies the whole batch as one
+    /// atomic jj-lib operation; dropping the handle without committing rolls them back).
+    async fn begin_transaction(&self) -> Result<Box<dyn VcsTx + '_>>;
 
     /// Undo the last operation (`jj undo`). Returns the human description jj printed.
     async fn undo(&self) -> Result<String>;
@@ -175,63 +180,68 @@ pub trait Vcs: Send + Sync {
     async fn set_config_repo(&self, key: &str, value: &str) -> Result<()>;
 }
 
-/// Mutation handle yielded inside [`Vcs::transaction`].
+/// Mutation handle from [`Vcs::begin_transaction`]. Issue mutations, then call [`commit`](VcsTx::commit).
 ///
 /// Methods that produce a new change return its (stable) [`ChangeId`] so the engine can refer to it
 /// in subsequent steps without re-deriving it.
+#[async_trait(?Send)]
 pub trait VcsTx {
     /// `jj commit -m <message>`: finalize `@` into a real commit and open a fresh empty `@`.
     /// Returns the finalized commit's change id (the just-created `@-`).
-    fn finalize_working_copy(&mut self, message: &str) -> Result<ChangeId>;
+    async fn finalize_working_copy(&mut self, message: &str) -> Result<ChangeId>;
 
     /// Like [`finalize_working_copy`](VcsTx::finalize_working_copy) but only finalizes the part of
     /// `@` named by `scope`; anything outside the scope stays uncommitted in the new `@`.
-    fn finalize_working_copy_scoped(
+    async fn finalize_working_copy_scoped(
         &mut self,
         message: &str,
         scope: &CommitScope,
     ) -> Result<ChangeId>;
 
     /// `jj describe <rev> -m <message>`.
-    fn describe(&mut self, rev: &ChangeId, message: &str) -> Result<()>;
+    async fn describe(&mut self, rev: &ChangeId, message: &str) -> Result<()>;
 
     /// Squash the working-copy (`@`) changes into `into` (amend). Descendants auto-rebase.
-    fn squash_working_into(&mut self, into: &ChangeId) -> Result<()>;
+    async fn squash_working_into(&mut self, into: &ChangeId) -> Result<()>;
 
     /// Squash all changes from `from` into `into` (`jj squash --from --into`). `from` is abandoned
     /// when it becomes empty; a bookmark on it moves to its parent (forget it separately).
-    fn squash(&mut self, from: &ChangeId, into: &ChangeId) -> Result<()>;
+    async fn squash(&mut self, from: &ChangeId, into: &ChangeId) -> Result<()>;
 
     /// Like [`squash`](VcsTx::squash) but `from` is a revset (e.g. a whole range of commits to
     /// collapse into `into`).
-    fn squash_revset(&mut self, from_revset: &str, into: &ChangeId) -> Result<()>;
+    async fn squash_revset(&mut self, from_revset: &str, into: &ChangeId) -> Result<()>;
 
     /// Rename a local bookmark.
-    fn rename_bookmark(&mut self, old: &str, new: &str) -> Result<()>;
+    async fn rename_bookmark(&mut self, old: &str, new: &str) -> Result<()>;
 
     /// Copy `rev` as a new commit inserted right after `after` (`jj duplicate --insert-after`),
     /// rebasing `after`'s existing children onto the copy.
-    fn duplicate_after(&mut self, rev: &ChangeId, after: &ChangeId) -> Result<()>;
+    async fn duplicate_after(&mut self, rev: &ChangeId, after: &ChangeId) -> Result<()>;
 
     /// `jj new <parent>`: create an empty child of `parent` and make it `@`. Returns its change id.
-    fn new_child(&mut self, parent: &ChangeId) -> Result<ChangeId>;
+    async fn new_child(&mut self, parent: &ChangeId) -> Result<ChangeId>;
 
     /// Make `rev` the working copy (`jj edit`), e.g. to resolve a conflict in place.
-    fn edit(&mut self, rev: &ChangeId) -> Result<()>;
+    async fn edit(&mut self, rev: &ChangeId) -> Result<()>;
 
     /// Create a new bookmark (errors if it exists).
-    fn create_bookmark(&mut self, name: &str, target: &ChangeId) -> Result<()>;
+    async fn create_bookmark(&mut self, name: &str, target: &ChangeId) -> Result<()>;
     /// Create-or-move a bookmark by name (`jj bookmark set`, `-B` for non-fast-forward).
-    fn set_bookmark(&mut self, name: &str, target: &ChangeId) -> Result<()>;
+    async fn set_bookmark(&mut self, name: &str, target: &ChangeId) -> Result<()>;
     /// Delete a bookmark locally and schedule its remote deletion on next push.
-    fn delete_bookmark(&mut self, name: &str) -> Result<()>;
+    async fn delete_bookmark(&mut self, name: &str) -> Result<()>;
     /// Forget a bookmark locally without scheduling a remote deletion.
-    fn forget_bookmark(&mut self, name: &str) -> Result<()>;
+    async fn forget_bookmark(&mut self, name: &str) -> Result<()>;
 
     /// `jj rebase -s <source> -d <dest>`: rebase source and descendants onto dest.
-    fn rebase(&mut self, source: &ChangeId, dest: &ChangeId) -> Result<()>;
+    async fn rebase(&mut self, source: &ChangeId, dest: &ChangeId) -> Result<()>;
 
     /// `jj abandon <revs...>`: abandon the commits in one op; descendants auto-rebase onto the
     /// abandoned range's parent. Bookmarks on abandoned commits are deleted (JJ_NOTES §2).
-    fn abandon(&mut self, revs: &[ChangeId]) -> Result<()>;
+    async fn abandon(&mut self, revs: &[ChangeId]) -> Result<()>;
+
+    /// Finalize the transaction: apply all issued mutations as one atomic jj-lib operation and
+    /// update the on-disk working copy. Consumes the handle.
+    async fn commit(self: Box<Self>) -> Result<()>;
 }

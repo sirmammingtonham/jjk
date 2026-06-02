@@ -36,14 +36,11 @@ fn remote_sha(bare: &Path, branch: &str) -> String {
 async fn seeded_stack(h: &mut RepoWithRemote, fake: &Arc<FakeForge>) {
     let root = h.repo.path().to_path_buf();
     write(&root, "README.md", "# seed\n");
-    h.engine
-        .vcs()
-        .transaction(&mut |tx| {
-            let id = tx.finalize_working_copy("chore: seed trunk")?;
-            tx.create_bookmark("main", &id)?;
-            Ok(())
-        })
-        .unwrap();
+    h.engine.vcs().snapshot().await.unwrap();
+    let mut tx = h.engine.vcs().begin_transaction().await.unwrap();
+    let id = tx.finalize_working_copy("chore: seed trunk").await.unwrap();
+    tx.create_bookmark("main", &id).await.unwrap();
+    tx.commit().await.unwrap();
     h.engine.vcs().push("origin", "main", PushOpts::default()).await.unwrap();
 
     // Simulate a repo whose local trunk bookmark does NOT track the remote (so plain fetch won't

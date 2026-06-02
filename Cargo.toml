@@ -20,6 +20,13 @@ toml = "0.8"
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+# Crate adapters (default backends): in-process jj via jj-lib, native GitHub API via octocrab.
+# jj-lib has no API stability guarantees across releases, so it is pinned to an exact version.
+jj-lib = "=0.41.0"
+# jj-cli's library target (NOT the `jj` binary) for in-process interactive diff/merge editors.
+jj-cli = { version = "=0.41.0", default-features = false, features = ["git"] }
+octocrab = "0.51"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"

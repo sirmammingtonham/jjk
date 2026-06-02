@@ -7,30 +7,35 @@ description: Install jjk and its dependencies.
 
 ## Requirements
 
+`jjk` runs **in-process**: it links the [`jj-lib`](https://crates.io/crates/jj-lib) crate (built against
+jj 0.41.x) for all version-control operations and the [`octocrab`](https://crates.io/crates/octocrab)
+crate for GitHub. **You do not need the `jj` binary installed.**
+
 | Tool | Why | Notes |
 | --- | --- | --- |
-| **[jj](https://jj-vcs.github.io/jj/) 0.41.x** | the VCS engine `jjk` drives | the version jjk is built against; other versions may work, and `jjk` warns at startup if yours differs (jj is pre-1.0, so its CLI can change between releases) |
-| **[gh](https://cli.github.com/)** | GitHub PR operations | only needed for `push` / `submit` / `sync`; must be authenticated |
+| **[git](https://git-scm.com/)** | colocated repo + fetch/push | jjk keeps a colocated git repo and uses `git` for network transport, hooks, and the staging area |
+| **A GitHub token** | GitHub PR operations | only needed for `push` / `submit` / `sync`. jjk reuses your existing auth: it reads `$GH_TOKEN`/`$GITHUB_TOKEN`, or falls back to `gh auth token` if you have the [`gh` CLI](https://cli.github.com/) |
 | **A jj identity** | authoring commits | set once, globally |
 
-Install jj (macOS shown; see the [jj install docs](https://jj-vcs.github.io/jj/latest/install-and-setup/) for other platforms):
+Authenticate GitHub — either export a token or sign in with the `gh` CLI (whose token jjk reuses):
 
 ```bash
-brew install jj
+gh auth login        # or: export GITHUB_TOKEN=...
 ```
 
-Authenticate the GitHub CLI (for the forge commands):
-
-```bash
-gh auth login
-```
-
-Configure a jj identity so your commits aren't authored anonymously:
+Configure a jj identity so your commits aren't authored anonymously (jjk reads jj's standard config,
+including `$JJ_CONFIG`):
 
 ```bash
 jj config set --user user.name  "Your Name"
 jj config set --user user.email "you@example.com"
 ```
+
+> If you don't have the `jj` binary, set `user.name`/`user.email` in `~/.config/jj/config.toml` directly.
+
+Interactive editing (`commit -i`, `commit --split`, `resolve --interactive`) opens whatever you
+configure as jj's `ui.diff-editor` / `ui.merge-editor` (an external/GUI tool, your `$EDITOR`, or the
+built-in TUI) — driven in-process, again with no `jj` binary required.
 
 ## Install jjk
 

@@ -25,13 +25,11 @@ fn git(dir: &Path, args: &[&str]) {
 /// Seed a `main` trunk commit and push it to origin.
 async fn seed_main(e: &mut Engine, root: &Path) {
     write(root, "README.md", "# smoke\n");
-    e.vcs()
-        .transaction(&mut |tx| {
-            let id = tx.finalize_working_copy("chore: seed trunk")?;
-            tx.create_bookmark("main", &id)?;
-            Ok(())
-        })
-        .unwrap();
+    e.vcs().snapshot().await.unwrap();
+    let mut tx = e.vcs().begin_transaction().await.unwrap();
+    let id = tx.finalize_working_copy("chore: seed trunk").await.unwrap();
+    tx.create_bookmark("main", &id).await.unwrap();
+    tx.commit().await.unwrap();
     e.vcs().push("origin", "main", PushOpts::default()).await.unwrap();
 }
 

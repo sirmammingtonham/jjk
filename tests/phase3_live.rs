@@ -106,18 +106,18 @@ async fn run_body(
             // Make sure a local `main` bookmark points at the fetched trunk.
             if !engine.vcs().bookmarks().await?.iter().any(|b| b.name == "main") {
                 let id = c.change_id.clone();
-                engine
-                    .vcs()
-                    .transaction(&mut |tx| tx.set_bookmark("main", &id))?;
+                let mut tx = engine.vcs().begin_transaction().await?;
+                tx.set_bookmark("main", &id).await?;
+                tx.commit().await?;
             }
         }
         None => {
             write(root, "README.md", "# jjk smoke\n");
-            engine.vcs().transaction(&mut |tx| {
-                let id = tx.finalize_working_copy("chore: seed trunk")?;
-                tx.create_bookmark("main", &id)?;
-                Ok(())
-            })?;
+            engine.vcs().snapshot().await?;
+            let mut tx = engine.vcs().begin_transaction().await?;
+            let id = tx.finalize_working_copy("chore: seed trunk").await?;
+            tx.create_bookmark("main", &id).await?;
+            tx.commit().await?;
             engine.vcs().push("origin", "main", PushOpts::default()).await?;
         }
     }

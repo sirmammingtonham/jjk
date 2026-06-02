@@ -206,10 +206,18 @@ path works and the conformance suite is green, and only where profiling justifie
 `jj-lib` to an exact version and expect upgrade maintenance. The abstraction is precisely what
 lets you defer, A/B, or reverse this decision freely.
 
-**Async boundary.** `Forge` is async (octocrab is async; needs `tokio`); `Vcs` is sync. The
-engine runs on a tokio runtime and calls the sync `Vcs` directly (or via `spawn_blocking` if it
-ever needs to overlap). The `gh_cli` forge adapter wraps subprocess calls to satisfy the async
-trait.
+**Async boundary.** Both ports are now **async**. `Forge` is async (octocrab is async). `Vcs` reads
+are async, and a command's mutations run inside an async [`VcsTx`] obtained from
+`begin_transaction()` and finalized with `commit()` — the `jj_lib` adapter maps that to one atomic
+jj-lib transaction. The trait futures are `?Send` (jj-lib's in-memory repo/transaction handles are
+not `Sync`); jjk drives one command to completion on the current runtime and never spawns a
+command's work onto another thread.
+
+> **Status (implemented).** The crate adapters described below as "Phase 6" are now the **shipped
+> default**: `vcs::jj_lib` (the sole VCS adapter, in-process) and `forge::octocrab` (default forge,
+> with `gh_cli` retained as a config-selectable fallback). There is **no `jj` binary dependency** —
+> interactive diff/merge editing reuses the `jj-cli` crate's `merge_tools` library, and git
+> fetch/push go through jj-lib's git layer (which shells out to `git`, as does jj itself).
 
 ---
 
@@ -378,10 +386,10 @@ establishes the conformance baseline. The crate adapters come last (Phase 6).
    do last of the core.
 5. **Worktrees + polish.** `worktree` commands, stale-handling, `stash`, conflict messaging,
    partial commit.
-6. **Crate adapters (optional, perf).** Implement `vcs::jj_lib` and/or `forge::octocrab` behind
-   the existing traits. Gate: the shared conformance suite (§4.1) passes identically for binary
-   and crate adapters; switching backends via config changes nothing observable except speed.
-   Only pursue where profiling shows a real win.
+6. **Crate adapters — DONE.** `vcs::jj_lib` (in-process, the sole VCS adapter) and
+   `forge::octocrab` (default forge) are implemented behind the existing traits and are now the
+   default. The whole integration suite (the conformance gate) passes against them, and the `jj`
+   binary is no longer required. `forge::gh_cli` remains as a config-selectable fallback.
 
 ---
 

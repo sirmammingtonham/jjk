@@ -17,13 +17,6 @@ use std::process::ExitCode;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // When the user is looking at top-level help, surface a jj-version compatibility note.
-    if wants_top_level_help() {
-        if let Some(w) = jjk::vcs::jj_cli::version_warning() {
-            eprintln!("{w}\n");
-        }
-    }
-
     let cli = Cli::parse();
     let Some(command) = cli.command else {
         // Bare `jjk`: print help.
@@ -68,14 +61,6 @@ fn to_root_relative(cwd: &Path, root: &Path, p: &str) -> String {
     match abs.strip_prefix(root) {
         Ok(rel) => rel.to_string_lossy().into_owned(),
         Err(_) => p.to_string(),
-    }
-}
-
-/// True when the invocation is the top-level help (bare `jjk`, `jjk help`, `jjk --help`, `jjk -h`).
-fn wants_top_level_help() -> bool {
-    match std::env::args().nth(1) {
-        None => true,
-        Some(a) => matches!(a.as_str(), "help" | "--help" | "-h"),
     }
 }
 

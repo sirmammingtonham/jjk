@@ -145,7 +145,7 @@ impl Engine {
         trunk: Option<String>,
         remote: Option<String>,
     ) -> Result<Report> {
-        use crate::vcs::jj_cli::JjCli;
+        use crate::vcs::jj_lib::JjLib;
         let mut report = Report::default();
         let already = dir.join(".jj").join("jjk").join("state.toml").exists();
         if already {
@@ -154,10 +154,10 @@ impl Engine {
         // Reuse an existing colocated jj repo, or create one.
         let vcs = if dir.join(".jj").exists() {
             report.note("using existing jj repo");
-            JjCli::new(dir)
+            JjLib::open(dir)?
         } else {
-            report.note("initialized colocated jj repo (jj git init --colocate)");
-            JjCli::init_colocated(dir)?
+            report.note("initialized colocated jj repo");
+            JjLib::init_colocated(dir).await?
         };
 
         let remote = match remote {
@@ -198,15 +198,15 @@ impl Engine {
     /// that workspace's working copy — per-workspace current branch, ARCH §8/D3), while shared
     /// `state.toml` is loaded from the **main** repo (resolved via `.jj/repo`).
     pub fn open(cwd: &Path) -> Result<Engine> {
-        use crate::vcs::jj_cli::JjCli;
+        use crate::vcs::jj_lib::JjLib;
         let ws_root = find_workspace_root(cwd).ok_or(JjkError::NotInitialized)?;
         let main_root = main_root_of(&ws_root)?;
         let state = State::load(&main_root)?;
         let vcs: Box<dyn Vcs> = match state.config.vcs_backend.as_str() {
-            "jj_cli" => Box::new(JjCli::new(&ws_root)),
+            "jj_lib" => Box::new(JjLib::open(&ws_root)?),
             other => {
                 return Err(JjkError::Msg(format!(
-                    "unknown vcs backend '{other}' (only 'jj_cli' is available)"
+                    "unknown vcs backend '{other}' (only 'jj_lib' is available)"
                 ))
                 .into())
             }
@@ -231,17 +231,24 @@ impl Engine {
 
     async fn build_forge(&self) -> Result<Box<dyn Forge>> {
         use crate::forge::gh_cli::GhCli;
+        use crate::forge::octocrab::{Octo, RepoCoord};
+        let url = self.vcs.remote_url(&self.state.config.remote).await?;
         match self.forge_backend.as_str() {
+            "octocrab" => {
+                let coord = url
+                    .as_deref()
+                    .and_then(RepoCoord::parse)
+                    .ok_or_else(|| JjkError::Msg(
+                        "no GitHub remote configured; cannot run forge operations".into(),
+                    ))?;
+                Ok(Box::new(Octo::new(coord)?))
+            }
             "gh_cli" => {
-                let slug = self
-                    .vcs
-                    .remote_url(&self.state.config.remote)
-                    .await?
-                    .and_then(|u| GhCli::slug_from_url(&u));
+                let slug = url.as_deref().and_then(GhCli::slug_from_url);
                 Ok(Box::new(GhCli::new(slug)))
             }
             other => Err(JjkError::Msg(format!(
-                "unknown forge backend '{other}' (only 'gh_cli' is available)"
+                "unknown forge backend '{other}' (only 'octocrab' and 'gh_cli' are available)"
             ))
             .into()),
         }
@@ -506,25 +513,22 @@ impl Engine {
     pub async fn commit_scoped(&mut self, message: &str, scope: &CommitScope) -> Result<Report> {
         let mut report = Report::default();
         self.ensure_fresh(&mut report).await?;
+        // Capture on-disk edits into @ before finalizing (jj-lib doesn't auto-snapshot).
+        self.vcs.snapshot().await?;
         let (branch, old_tip) = self.current_branch_tip().await?.ok_or(JjkError::NotOnBranch)?;
         let upstack_firsts = self.upstack_first_commits(&old_tip).await?;
 
         let branch_cl = branch.clone();
-        let mut new_tip: Option<ChangeId> = None;
-        self.vcs.transaction(&mut |tx| {
-            let c = tx.finalize_working_copy_scoped(message, scope)?; // C = @-, fresh @ keeps the rest
-            tx.set_bookmark(&branch_cl, &c)?; // advance bookmark (no-op if already there)
-            for f in &upstack_firsts {
-                tx.rebase(f, &c)?; // restack upstack onto C
-            }
-            new_tip = Some(c);
-            Ok(())
-        })?;
-
-        if let Some(c) = &new_tip {
-            self.state.branch_mut(&branch).change_id = Some(c.0.clone());
-            self.state.save(&self.root)?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        let new_tip = tx.finalize_working_copy_scoped(message, scope).await?; // C = @-, fresh @ keeps the rest
+        tx.set_bookmark(&branch_cl, &new_tip).await?; // advance bookmark (no-op if already there)
+        for f in &upstack_firsts {
+            tx.rebase(f, &new_tip).await?; // restack upstack onto C
         }
+        tx.commit().await?;
+
+        self.state.branch_mut(&branch).change_id = Some(new_tip.0.clone());
+        self.state.save(&self.root)?;
         if !upstack_firsts.is_empty() {
             let n = upstack_firsts.len();
             report.note(format!("restacked {n} upstack {}", plural(n, "branch", "branches")));
@@ -539,15 +543,16 @@ impl Engine {
     pub async fn commit_amend(&mut self, message: Option<&str>) -> Result<Report> {
         let mut report = Report::default();
         self.ensure_fresh(&mut report).await?;
+        // Capture on-disk edits into @ before squashing them into the tip.
+        self.vcs.snapshot().await?;
         let (branch, tip) = self.current_branch_tip().await?.ok_or(JjkError::NotOnBranch)?;
         let msg = message.map(|s| s.to_string());
-        self.vcs.transaction(&mut |tx| {
-            tx.squash_working_into(&tip)?;
-            if let Some(m) = &msg {
-                tx.describe(&tip, m)?;
-            }
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.squash_working_into(&tip).await?;
+        if let Some(m) = &msg {
+            tx.describe(&tip, m).await?;
+        }
+        tx.commit().await?;
         report.note(format!("amended {branch}"));
         self.collect_conflicts(&mut report).await?;
         Ok(report)
@@ -566,11 +571,10 @@ impl Engine {
             None => self.trunk_anchor().await?.1,
         };
         let name_cl = name.to_string();
-        self.vcs.transaction(&mut |tx| {
-            let at = tx.new_child(&base)?; // fresh empty @ child of base
-            tx.create_bookmark(&name_cl, &at)?; // bookmark on the empty @ (rides real commits later)
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        let at = tx.new_child(&base).await?; // fresh empty @ child of base
+        tx.create_bookmark(&name_cl, &at).await?; // bookmark on the empty @ (rides real commits later)
+        tx.commit().await?;
         let entry = self.state.branch_mut(name);
         entry.tracked = tracked;
         self.state.save(&self.root)?;
@@ -590,10 +594,9 @@ impl Engine {
         } else {
             self.branch_tip(name).await?
         };
-        self.vcs.transaction(&mut |tx| {
-            tx.new_child(&tip)?;
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.new_child(&tip).await?;
+        tx.commit().await?;
         report.note(format!("switched to {name}"));
         Ok(report)
     }
@@ -632,10 +635,9 @@ impl Engine {
         } else {
             self.branch_tip(&target).await?
         };
-        self.vcs.transaction(&mut |tx| {
-            tx.new_child(&tip)?;
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.new_child(&tip).await?;
+        tx.commit().await?;
         report.note(format!("moved to {target}"));
         Ok(report)
     }
@@ -663,12 +665,11 @@ impl Engine {
         if actions.is_empty() {
             report.note("stack already up to date (jj auto-rebases; nothing to do)");
         } else {
-            self.vcs.transaction(&mut |tx| {
-                for (src, dest) in &actions {
-                    tx.rebase(src, dest)?;
-                }
-                Ok(())
-            })?;
+            let mut tx = self.vcs.begin_transaction().await?;
+            for (src, dest) in &actions {
+                tx.rebase(src, dest).await?;
+            }
+            tx.commit().await?;
             let n = actions.len();
             report.note(format!("restacked {n} {}", plural(n, "branch", "branches")));
         }
@@ -714,15 +715,16 @@ impl Engine {
         let range: Vec<ChangeId> = branch.commits.iter().map(|c| c.change_id.clone()).collect();
         let had_upstack = stack.upstack(name).is_some();
 
-        self.vcs.transaction(&mut |tx| {
-            tx.abandon(&range)?; // abandons the range (deletes the bookmark) + auto-rebases upstack
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.abandon(&range).await?; // abandons the range (deletes the bookmark) + auto-rebases upstack
+        tx.commit().await?;
 
         // Defensive: if a bookmark somehow survived (e.g. it wasn't on the abandoned tip), drop it.
         if self.vcs.bookmarks().await?.iter().any(|b| b.name == name) {
             let n = name.to_string();
-            self.vcs.transaction(&mut |tx| tx.delete_bookmark(&n))?;
+            let mut tx = self.vcs.begin_transaction().await?;
+            tx.delete_bookmark(&n).await?;
+            tx.commit().await?;
         }
 
         self.state.branches.remove(name);
@@ -742,10 +744,9 @@ impl Engine {
         let mut report = Report::default();
         self.ensure_fresh(&mut report).await?;
         let (_, id) = self.trunk_anchor().await?;
-        self.vcs.transaction(&mut |tx| {
-            tx.new_child(&id)?;
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.new_child(&id).await?;
+        tx.commit().await?;
         report.note(format!("switched to trunk '{}'", self.state.config.trunk));
         Ok(report)
     }
@@ -770,10 +771,9 @@ impl Engine {
         } else {
             self.branch_tip(target).await?
         };
-        self.vcs.transaction(&mut |tx| {
-            tx.rebase(&first, &dest)?;
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.rebase(&first, &dest).await?;
+        tx.commit().await?;
         report.note(format!("moved '{branch}' onto '{target}'"));
         self.collect_conflicts(&mut report).await?;
         Ok(report)
@@ -797,7 +797,9 @@ impl Engine {
             return Err(JjkError::Msg(format!("branch '{new}' already exists")).into());
         }
         let (o, n) = (old.clone(), new.to_string());
-        self.vcs.transaction(&mut |tx| tx.rename_bookmark(&o, &n))?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.rename_bookmark(&o, &n).await?;
+        tx.commit().await?;
         if let Some(entry) = self.state.branches.remove(&old) {
             self.state.branches.insert(new.to_string(), entry);
         }
@@ -841,13 +843,12 @@ impl Engine {
         // Squash every commit above the first (first..tip, by change id) into the first.
         let range = format!("{}..{}", first.as_str(), b.tip.as_str());
         let msg = message.map(|s| s.to_string());
-        self.vcs.transaction(&mut |tx| {
-            tx.squash_revset(&range, &first)?;
-            if let Some(m) = &msg {
-                tx.describe(&first, m)?;
-            }
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.squash_revset(&range, &first).await?;
+        if let Some(m) = &msg {
+            tx.describe(&first, m).await?;
+        }
+        tx.commit().await?;
         report.note(format!("squashed '{branch}' into one commit"));
         self.collect_conflicts(&mut report).await?;
         Ok(report)
@@ -871,11 +872,10 @@ impl Engine {
             ))
         })?;
         let (bname, brn) = (base.clone(), branch.clone());
-        self.vcs.transaction(&mut |tx| {
-            tx.set_bookmark(&bname, &tip)?; // base absorbs the branch's commits
-            tx.delete_bookmark(&brn)?;
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.set_bookmark(&bname, &tip).await?; // base absorbs the branch's commits
+        tx.delete_bookmark(&brn).await?;
+        tx.commit().await?;
         self.state.branches.remove(&branch);
         self.state.save(&self.root)?;
         report.note(format!("folded '{branch}' into '{base}'"));
@@ -897,8 +897,9 @@ impl Engine {
             report.note("nothing to fix up (working copy is clean)");
             return Ok(report);
         }
-        self.vcs
-            .transaction(&mut |tx| tx.squash_working_into(&target_tip))?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.squash_working_into(&target_tip).await?;
+        tx.commit().await?;
         report.note(format!("fixed up '{target}' with working-copy changes"));
         self.collect_conflicts(&mut report).await?;
         Ok(report)
@@ -931,8 +932,9 @@ impl Engine {
             .ok_or_else(|| JjkError::Msg(format!("no commit matches '{rev}'")))?
             .change_id;
         let tip_cl = tip.clone();
-        self.vcs
-            .transaction(&mut |tx| tx.duplicate_after(&src, &tip_cl))?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.duplicate_after(&src, &tip_cl).await?;
+        tx.commit().await?;
         // After --insert-after, the copy is the sole new child of the old tip.
         let dup = self
             .vcs
@@ -943,8 +945,9 @@ impl Engine {
             .ok_or_else(|| JjkError::Msg("could not locate the picked commit".into()))?
             .change_id;
         let bname = branch.clone();
-        self.vcs
-            .transaction(&mut |tx| tx.set_bookmark(&bname, &dup))?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.set_bookmark(&bname, &dup).await?;
+        tx.commit().await?;
         report.note(format!("picked {} onto '{branch}'", src.short()));
         self.collect_conflicts(&mut report).await?;
         Ok(report)
@@ -979,8 +982,9 @@ impl Engine {
             .into());
         }
         let name = new_name.to_string();
-        self.vcs
-            .transaction(&mut |tx| tx.create_bookmark(&name, &at_id))?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.create_bookmark(&name, &at_id).await?;
+        tx.commit().await?;
         self.state.branch_mut(new_name).tracked = true;
         self.state.save(&self.root)?;
         report.note(format!(
@@ -1078,11 +1082,10 @@ impl Engine {
         let name = format!("jjk/stash/{n}");
         let wc_id = wc.change_id.clone();
         let name_cl = name.clone();
-        self.vcs.transaction(&mut |tx| {
-            tx.create_bookmark(&name_cl, &wc_id)?; // park the changes
-            tx.new_child(&parent)?; // clean empty @ on the same parent
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.create_bookmark(&name_cl, &wc_id).await?; // park the changes
+        tx.new_child(&parent).await?; // clean empty @ on the same parent
+        tx.commit().await?;
         report.note(format!("stashed working copy as {name}"));
         Ok(report)
     }
@@ -1099,11 +1102,10 @@ impl Engine {
             .ok_or_else(|| JjkError::Msg("no stash to pop".into()))?;
         let into = self.vcs.working_copy().await?.change_id;
         let name_cl = name.clone();
-        self.vcs.transaction(&mut |tx| {
-            tx.squash(&from, &into)?; // restore changes into @ (abandons the now-empty stash)
-            tx.forget_bookmark(&name_cl)?; // bookmark slid to the parent; drop it (local-only)
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.squash(&from, &into).await?; // restore changes into @ (abandons the now-empty stash)
+        tx.forget_bookmark(&name_cl).await?; // bookmark slid to the parent; drop it (local-only)
+        tx.commit().await?;
         report.note(format!("popped {name}"));
         Ok(report)
     }
@@ -1162,7 +1164,9 @@ impl Engine {
                 pushed: Vec::new(),
             })?;
         }
-        self.vcs.transaction(&mut |tx| tx.edit(&target))?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.edit(&target).await?;
+        tx.commit().await?;
         if interactive {
             self.vcs.resolve_with_merge_tool(&target).await?;
             self.advance_or_finish(&mut report).await?;
@@ -1200,7 +1204,9 @@ impl Engine {
         }
         let stack = self.derive_stack().await?;
         if let Some(next) = lowest_conflict(&stack) {
-            self.vcs.transaction(&mut |tx| tx.edit(&next))?;
+            let mut tx = self.vcs.begin_transaction().await?;
+            tx.edit(&next).await?;
+            tx.commit().await?;
             report.note("✓ resolved");
             self.announce_conflict(&stack, &next, report).await;
             return Ok(());
@@ -1261,10 +1267,9 @@ impl Engine {
         } else {
             self.trunk_anchor().await?.1
         };
-        self.vcs.transaction(&mut |tx| {
-            tx.new_child(&tip)?;
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.new_child(&tip).await?;
+        tx.commit().await?;
         if let Some(b) = &session.home {
             if !home_ok {
                 report.note(format!("'{b}' is gone (merged during sync)"));
@@ -1524,7 +1529,9 @@ impl Engine {
         }
         let target = remote_tip.change_id;
         let name = trunk.clone();
-        self.vcs.transaction(&mut |tx| tx.set_bookmark(&name, &target))?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        tx.set_bookmark(&name, &target).await?;
+        tx.commit().await?;
         report.note(format!("updated trunk '{trunk}' to {remote}"));
         Ok(())
     }
@@ -1559,12 +1566,11 @@ impl Engine {
             return Ok(0);
         }
         let n = to_move.len();
-        self.vcs.transaction(&mut |tx| {
-            for r in &to_move {
-                tx.rebase(r, &trunk_id)?;
-            }
-            Ok(())
-        })?;
+        let mut tx = self.vcs.begin_transaction().await?;
+        for r in &to_move {
+            tx.rebase(r, &trunk_id).await?;
+        }
+        tx.commit().await?;
         Ok(n)
     }
 
@@ -1879,7 +1885,9 @@ impl Engine {
                 Some(b) => {
                     let range: Vec<ChangeId> =
                         b.commits.iter().map(|c| c.change_id.clone()).collect();
-                    self.vcs.transaction(&mut |tx| tx.abandon(&range))?;
+                    let mut tx = self.vcs.begin_transaction().await?;
+                    tx.abandon(&range).await?;
+                    tx.commit().await?;
                     report.note(format!("abandoned merged '{name}' (squash landing)"));
                 }
                 // Merge-commit landing: the branch's commit is an ancestor of trunk (immutable);
@@ -1887,7 +1895,9 @@ impl Engine {
                 None => {
                     if self.vcs.bookmarks().await?.iter().any(|bm| bm.name == *name) {
                         let n = name.clone();
-                        self.vcs.transaction(&mut |tx| tx.delete_bookmark(&n))?;
+                        let mut tx = self.vcs.begin_transaction().await?;
+                        tx.delete_bookmark(&n).await?;
+                        tx.commit().await?;
                     }
                     report.note(format!("dropped merged '{name}' (merge-commit landing)"));
                 }

@@ -2,6 +2,7 @@
 //! adapter wraps subprocess calls to satisfy it). Fully implemented in Phase 3.
 
 pub mod gh_cli;
+pub mod octocrab;
 
 use crate::error::Result;
 use crate::model::PrRef;

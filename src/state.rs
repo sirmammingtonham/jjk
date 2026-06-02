@@ -26,10 +26,10 @@ fn default_forge() -> String {
     "github".into()
 }
 fn default_vcs_backend() -> String {
-    "jj_cli".into()
+    "jj_lib".into()
 }
 fn default_forge_backend() -> String {
-    "gh_cli".into()
+    "octocrab".into()
 }
 
 /// Per-branch persisted record. Keyed by branch name; validated against the jj change id so it

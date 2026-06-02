@@ -85,15 +85,17 @@ async fn run_body(engine: &mut Engine, root: &Path, a: &str, b: &str) -> anyhow:
         .unwrap_or(false);
     if !has_main {
         write(root, "README.md", "# jjk smoke\n");
-        engine.vcs().transaction(&mut |tx| {
-            let id = tx.finalize_working_copy("chore: seed trunk")?;
-            tx.create_bookmark("main", &id)?;
-            Ok(())
-        })?;
+        engine.vcs().snapshot().await?;
+        let mut tx = engine.vcs().begin_transaction().await?;
+        let id = tx.finalize_working_copy("chore: seed trunk").await?;
+        tx.create_bookmark("main", &id).await?;
+        tx.commit().await?;
         engine.vcs().push("origin", "main", PushOpts::default()).await?;
     } else if !engine.vcs().bookmarks().await?.iter().any(|bm| bm.name == "main") {
         let id = engine.vcs().resolve("main@origin").await?[0].change_id.clone();
-        engine.vcs().transaction(&mut |tx| tx.set_bookmark("main", &id))?;
+        let mut tx = engine.vcs().begin_transaction().await?;
+        tx.set_bookmark("main", &id).await?;
+        tx.commit().await?;
     }
 
     // Two-branch stack.
