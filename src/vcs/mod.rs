@@ -87,6 +87,16 @@ pub trait Vcs: Send + Sync {
     /// Human-readable diff for a revset (e.g. `base..tip`). Non-snapshotting.
     async fn diff(&self, revset: &str) -> Result<String>;
 
+    /// Repo-root-relative paths that are conflicted in `rev` (`jj resolve --list -r <rev>`); empty
+    /// when there are none. A display helper for guiding conflict resolution — best-effort, so
+    /// callers may treat any error as "no paths".
+    async fn conflicted_paths(&self, rev: &ChangeId) -> Result<Vec<String>>;
+
+    /// Resolve the conflicts in `rev` with jj's configured merge tool (`jj resolve`), one file at a
+    /// time — the `git mergetool`-style focused flow. Inherits the terminal. Any error (e.g. no
+    /// merge tool configured) surfaces jj's own guidance.
+    async fn resolve_with_merge_tool(&self, rev: &ChangeId) -> Result<()>;
+
     /// Repo-root-relative paths currently staged in the colocated git index
     /// (`git diff --cached --name-only`). Empty when nothing is staged. jj ignores the index, so
     /// this is purely a signal of what the user staged (e.g. via their editor).
@@ -159,6 +169,10 @@ pub trait Vcs: Send + Sync {
     /// Value of a jj config key (`jj config get <key>`), or `None` if it is unset. Lets jjk read
     /// user-set knobs (e.g. an opt-in flag in the repo's jj config) without its own config file.
     async fn config_get(&self, key: &str) -> Result<Option<String>>;
+
+    /// Set a repo-local jj config value (`jj config set --repo <key> <value>`), written to the
+    /// repo's `.jj/repo/config.toml`. Used by `repo init` to pick git-friendly defaults.
+    async fn set_config_repo(&self, key: &str, value: &str) -> Result<()>;
 }
 
 /// Mutation handle yielded inside [`Vcs::transaction`].

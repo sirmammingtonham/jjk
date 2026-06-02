@@ -48,7 +48,10 @@ description: Every jjk command at a glance.
 | `jjk restack` | Re-parent the upstack onto its bases. Usually a no-op (jj auto-rebases). |
 | `jjk up` / `jjk down` | Move one branch away from / toward trunk. |
 | `jjk top` / `jjk bottom` / `jjk trunk` | Jump to the top / bottom of the stack, or to trunk. |
-| `jjk resolve` | Open the lowest conflicted change for editing; the fix propagates upstack. |
+| `jjk resolve` | Start resolving conflicts: jump to the first conflicted change and list the files to fix. |
+| `jjk resolve --continue` | Record the current fix and move to the next conflict — or, when all are resolved, return to the branch you started on and resume the sync. |
+| `jjk resolve --interactive` / `-i` | Resolve the current conflict with your configured merge tool, one file at a time. |
+| `jjk resolve --abort` | Give up resolving and rewind to the state from before the sync. |
 | `jjk undo` | Undo the last `jjk` command as a single unit (it may be several jj operations), restoring both the repo and jjk's state. Run repeatedly to walk further back. |
 
 ## Remote & forge (GitHub)

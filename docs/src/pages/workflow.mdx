@@ -113,14 +113,32 @@ merged-PR detection and no push.
 
 ## Conflicts
 
-jj stores conflicts inside commits, so operations complete instead of halting. When `jjk` reports
-`CONFLICT: N change(s) need resolution`:
+jj stores conflicts inside commits, so a `sync` (or any rebase) **completes and reports** the
+conflict instead of halting partway like `git rebase`. When `jjk` prints
+`CONFLICT: N change(s) need resolution`, it walks you through them git-style:
 
 ```bash
-jjk resolve            # opens the lowest conflicted change for editing
-# ...edit the marked files to resolve...
-jjk status             # confirms it's resolved; the fix propagates upstack
-jjk checkout <branch>  # restore a clean working copy
+jjk resolve              # jumps to the first conflict and lists exactly which files to fix
+# ...edit the marked files (only those — the rest of the change is already correct)...
+jjk resolve --continue   # records the fix, then moves to the next conflict, or finishes
+```
+
+Run `jjk resolve --continue` once per conflict. When the last one is resolved it puts you **back on
+the branch you started on** and re-runs the `sync` for you, so the now-fixed branches get pushed.
+`jjk status` reminds you where you are while a resolution is in progress.
+
+Two extra options:
+
+```bash
+jjk resolve --interactive   # resolve with your configured merge tool, one file at a time
+jjk resolve --abort         # give up and rewind to the state from before the sync
+```
+
+Conflicts are shown with standard git-style markers (`<<<<<<<` / `=======` / `>>>>>>>`). New repos
+get this automatically; on a repo you set up before this was added, enable it once with:
+
+```bash
+jj config set --repo ui.conflict-marker-style git
 ```
 
 ## Working on several branches at once

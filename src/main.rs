@@ -7,7 +7,7 @@ use jjk::cli::{
     BranchCmd, Cli, Command, DownstackCmd, PrCmd, RepoCmd, StashAction, SubmitArgs, UpstackCmd,
     WorktreeCmd,
 };
-use jjk::engine::{Engine, NavDir, SubmitOptions, SubmitScope};
+use jjk::engine::{Engine, NavDir, ResumeCmd, SubmitOptions, SubmitScope};
 use jjk::prompt::{PrDraft, Prompter};
 use jjk::render;
 use jjk::vcs::CommitScope;
@@ -104,6 +104,11 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
     let mut engine = Engine::open(cwd)?;
     let mut conflicts = false;
     let is_mutating = mutates(&command);
+    // When a command leaves conflicts, we open a guided resolve session after dispatch. Only a
+    // command with a *deferred* remote effect records a resume action (sync skips pushing
+    // conflicted branches); `pushed` tracks branches it already pushed, for the `--abort` note.
+    let mut resume_cmd: Option<ResumeCmd> = None;
+    let mut pushed: Vec<String> = Vec::new();
 
     // Follow a plain `git checkout`: if git HEAD moved out from under jj, reconcile so position
     // tracking is correct (jjk's fast reads skip jj's HEAD import). Surface where we landed.
@@ -265,7 +270,13 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             print!("{}", render::render_ls(&stack));
             if stack.branches.iter().any(|b| b.has_conflict()) {
                 conflicts = true;
-                eprintln!("\nThis stack has conflicts; run `jjk resolve`.");
+                if engine.has_resolve_session() {
+                    eprintln!(
+                        "\nResolving conflicts — fix the marked files, then `jjk resolve --continue` (or `--abort`)."
+                    );
+                } else {
+                    eprintln!("\nThis stack has conflicts; run `jjk resolve`.");
+                }
             }
         }
         Command::Ls => {
@@ -311,9 +322,18 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             render::print_report(&report);
         }
 
-        Command::Resolve => {
-            let report = engine.resolve().await?;
+        Command::Resolve(args) => {
+            let report = if args.abort {
+                engine.resolve_abort().await?
+            } else if args.cont {
+                engine.resolve_continue().await?
+            } else {
+                engine.resolve(args.interactive).await?
+            };
             render::print_report(&report);
+            // Exit nonzero while the stack still has conflicts (e.g. after entering or a partial
+            // continue), success once they're all resolved.
+            conflicts = engine.has_conflicts().await?;
         }
 
         Command::Fetch => render::print_report(&engine.fetch().await?),
@@ -338,6 +358,16 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         Command::Sync(args) => {
             let report = engine.sync(/*push=*/ !args.no_push).await?;
             conflicts = !report.conflicts.is_empty();
+            if conflicts {
+                // Resume this same sync once the stack is clean — that's what pushes the branches
+                // it had to skip. Capture which branches it already pushed (for the abort note).
+                resume_cmd = Some(ResumeCmd::Sync { push: !args.no_push });
+                pushed = report
+                    .notes
+                    .iter()
+                    .filter_map(|n| n.strip_prefix("pushed ").map(|s| s.to_string()))
+                    .collect();
+            }
             render::print_report(&report);
         }
 
@@ -351,6 +381,15 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
     // leave `@`/HEAD untouched, so skip the (otherwise per-command) git-HEAD reattach there.
     if is_mutating || reconciled {
         let _ = engine.sync_git_head_to_current().await;
+    }
+
+    // If a command left the stack conflicted, open a guided resolve session (no-op if one is
+    // already active, e.g. mid-`resolve`) so `jjk resolve` can walk through it and return you home.
+    // Best-effort — a failure to record it must never fail the command.
+    if conflicts {
+        let _ = engine
+            .begin_resolve_session_if_absent(resume_cmd, pushed)
+            .await;
     }
 
     Ok(if conflicts {

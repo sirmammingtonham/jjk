@@ -188,6 +188,176 @@ async fn sync_reports_conflict_without_aborting() {
     assert!(h.engine.derive_stack().await.unwrap().branch("feat-b").is_some());
 }
 
+#[tokio::test]
+async fn resolve_workflow_walks_conflicts_and_returns_home() {
+    // Same conflict as `sync_reports_conflict_without_aborting`, then drive the git-style loop:
+    // resolve (enter) → fix the file → resolve --continue (finish) lands back on the branch you
+    // started on with the stack clean and the session cleared.
+    let mut h = setup_with_remote().await;
+    let root = h.repo.path().to_path_buf();
+    seed_main(&mut h.engine, &root).await;
+
+    h.engine.branch_create("feat-a", true).await.unwrap();
+    write(&root, "shared.txt", "from-a\n");
+    h.engine.commit("feat-a: shared").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
+    write(&root, "shared.txt", "from-b\n");
+    h.engine.commit("feat-b: shared edit").await.unwrap();
+
+    let fake = Arc::new(FakeForge::new());
+    h.engine.set_forge(Box::new(SharedForge(fake.clone())));
+    h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
+
+    // Squash-land feat-a with different content so feat-b conflicts on rebase.
+    let work = clone_remote(&h);
+    git(work.path(), &["checkout", "main"]);
+    write(work.path(), "shared.txt", "from-trunk\n");
+    git(work.path(), &["add", "shared.txt"]);
+    git(work.path(), &["commit", "-m", "feat-a landed (modified)"]);
+    git(work.path(), &["push", "origin", "main"]);
+    fake.set_merged("feat-a");
+
+    let report = h.engine.sync(true).await.unwrap();
+    assert!(!report.conflicts.is_empty(), "sync should surface the conflict");
+
+    // main.rs opens the session after a conflicting command; mirror that here, with no resume so
+    // the finish step stays offline (the auto-resume path is exercised by `jjk sync` end-to-end).
+    h.engine
+        .begin_resolve_session_if_absent(None, vec![])
+        .await
+        .unwrap();
+    assert!(h.engine.has_resolve_session());
+
+    // Enter: jump to the conflicted change. Still conflicted until we fix and continue.
+    h.engine.resolve(false).await.unwrap();
+    assert!(h.engine.has_conflicts().await.unwrap());
+
+    // Fix the conflict on disk, then continue: captures the fix, finds nothing left, returns home.
+    write(&root, "shared.txt", "resolved\n");
+    let report = h.engine.resolve_continue().await.unwrap();
+    assert!(
+        !h.engine.has_conflicts().await.unwrap(),
+        "stack should be clean after continue: {:?}",
+        report.notes
+    );
+    assert!(!h.engine.has_resolve_session(), "session cleared on finish");
+    assert_eq!(
+        h.engine.current_branch().await.unwrap().as_deref(),
+        Some("feat-b"),
+        "should land back on the branch we started on"
+    );
+}
+
+#[tokio::test]
+async fn resolve_abort_restores_pre_sync_state() {
+    // After a conflicting sync, `resolve --abort` rewinds to the pre-sync checkpoint, the way
+    // `git rebase --abort` would. We seed a checkpoint explicitly (main.rs records one per command).
+    let mut h = setup_with_remote().await;
+    let root = h.repo.path().to_path_buf();
+    seed_main(&mut h.engine, &root).await;
+
+    h.engine.branch_create("feat-a", true).await.unwrap();
+    write(&root, "shared.txt", "from-a\n");
+    h.engine.commit("feat-a: shared").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
+    write(&root, "shared.txt", "from-b\n");
+    h.engine.commit("feat-b: shared edit").await.unwrap();
+
+    let fake = Arc::new(FakeForge::new());
+    h.engine.set_forge(Box::new(SharedForge(fake.clone())));
+    h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
+
+    // Checkpoint before sync (as the binary would), so abort has a precise point to rewind to.
+    h.engine.checkpoint().await.unwrap();
+
+    let work = clone_remote(&h);
+    git(work.path(), &["checkout", "main"]);
+    write(work.path(), "shared.txt", "from-trunk\n");
+    git(work.path(), &["add", "shared.txt"]);
+    git(work.path(), &["commit", "-m", "feat-a landed (modified)"]);
+    git(work.path(), &["push", "origin", "main"]);
+    fake.set_merged("feat-a");
+
+    h.engine.sync(true).await.unwrap();
+    h.engine
+        .begin_resolve_session_if_absent(None, vec![])
+        .await
+        .unwrap();
+    assert!(h.engine.has_conflicts().await.unwrap());
+
+    h.engine.resolve_abort().await.unwrap();
+    assert!(!h.engine.has_resolve_session(), "session cleared on abort");
+    assert!(
+        !h.engine.has_conflicts().await.unwrap(),
+        "abort should rewind past the conflicting rebase"
+    );
+}
+
+#[tokio::test]
+async fn repo_init_sets_git_conflict_markers() {
+    // `repo init` should pick git-style conflict markers so they read familiarly.
+    let h = setup_with_remote().await;
+    assert_eq!(
+        h.engine
+            .vcs()
+            .config_get("ui.conflict-marker-style")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("git")
+    );
+}
+
+#[tokio::test]
+async fn resolve_interactive_uses_merge_tool() {
+    // `jjk resolve --interactive` drives jj's configured merge tool. We point ui.merge-editor at
+    // the built-in `:ours` so it resolves non-interactively in the test, then assert it cleared the
+    // conflict and returned us home.
+    let mut h = setup_with_remote().await;
+    let root = h.repo.path().to_path_buf();
+    h.engine
+        .vcs()
+        .set_config_repo("ui.merge-editor", ":ours")
+        .await
+        .unwrap();
+    seed_main(&mut h.engine, &root).await;
+
+    h.engine.branch_create("feat-a", true).await.unwrap();
+    write(&root, "shared.txt", "from-a\n");
+    h.engine.commit("feat-a: shared").await.unwrap();
+    h.engine.branch_create("feat-b", true).await.unwrap();
+    write(&root, "shared.txt", "from-b\n");
+    h.engine.commit("feat-b: shared edit").await.unwrap();
+
+    let fake = Arc::new(FakeForge::new());
+    h.engine.set_forge(Box::new(SharedForge(fake.clone())));
+    h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
+
+    let work = clone_remote(&h);
+    git(work.path(), &["checkout", "main"]);
+    write(work.path(), "shared.txt", "from-trunk\n");
+    git(work.path(), &["add", "shared.txt"]);
+    git(work.path(), &["commit", "-m", "feat-a landed (modified)"]);
+    git(work.path(), &["push", "origin", "main"]);
+    fake.set_merged("feat-a");
+
+    h.engine.sync(true).await.unwrap();
+    h.engine
+        .begin_resolve_session_if_absent(None, vec![])
+        .await
+        .unwrap();
+    assert!(h.engine.has_conflicts().await.unwrap());
+
+    // Merge-tool resolution clears the conflict and finishes back on the branch we started on.
+    h.engine.resolve(true).await.unwrap();
+    assert!(!h.engine.has_conflicts().await.unwrap(), "merge tool should resolve the conflict");
+    assert!(!h.engine.has_resolve_session(), "session cleared on finish");
+    assert_eq!(
+        h.engine.current_branch().await.unwrap().as_deref(),
+        Some("feat-b")
+    );
+}
+
 /// Run a raw `jj` command in `root` (for test setup that jjk doesn't expose).
 fn jj(root: &Path, args: &[&str]) {
     let ok = Command::new("jj")

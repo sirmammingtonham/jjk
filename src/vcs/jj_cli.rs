@@ -299,6 +299,34 @@ impl Vcs for JjCli {
             .await
     }
 
+    async fn conflicted_paths(&self, rev: &ChangeId) -> Result<Vec<String>> {
+        // `jj resolve --list` prints one line per conflicted file: `<path><padding><description>`
+        // (e.g. `src/a.rs    2-sided conflict`). The path column is padded with ≥2 spaces while the
+        // description uses single spaces, so the path is everything before the first run of 2+
+        // spaces. Best-effort: with no conflicts jj exits non-zero ("No conflicts found …"), which
+        // we map to an empty list rather than an error.
+        let out = match self
+            .run_async(&["resolve", "--list", "--color=never", "-r", rev.as_str()])
+            .await
+        {
+            Ok(o) => o,
+            Err(_) => return Ok(Vec::new()),
+        };
+        Ok(out
+            .lines()
+            .filter_map(|l| {
+                let path = l.split("  ").next().unwrap_or("").trim();
+                (!path.is_empty()).then(|| path.to_string())
+            })
+            .collect())
+    }
+
+    async fn resolve_with_merge_tool(&self, rev: &ChangeId) -> Result<()> {
+        // jj's own resolver launches `ui.merge-editor` on each conflicted file in `rev`; inherit
+        // the terminal so the tool can interact (like `split_interactive`).
+        self.run_interactive(&["resolve", "-r", rev.as_str()])
+    }
+
     async fn staged_paths(&self) -> Result<Vec<String>> {
         // Query the colocated git index directly (jj doesn't touch it). Paths are root-relative.
         let out = AsyncCommand::new("git")
@@ -662,6 +690,11 @@ impl Vcs for JjCli {
             return Ok(None);
         }
         Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
+    }
+
+    async fn set_config_repo(&self, key: &str, value: &str) -> Result<()> {
+        self.run_async(&["config", "set", "--repo", key, value]).await?;
+        Ok(())
     }
 }
 

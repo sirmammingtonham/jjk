@@ -62,8 +62,9 @@ pub enum Command {
     /// Park/unpark working-copy changes (muscle memory; switching is safe in jj).
     Stash(StashArgs),
 
-    /// Open the lowest conflicted change to resolve it.
-    Resolve,
+    /// Resolve conflicts step by step: open the lowest conflicted change, `--continue` to advance
+    /// once fixed (and finish back on your branch), or `--abort` to undo the sync.
+    Resolve(ResolveArgs),
 
     /// Restack the upstack (usually a no-op with jj).
     Restack,
@@ -253,6 +254,21 @@ pub struct WorktreeAddArgs {
     /// Start the workspace on this branch's tip (default: trunk).
     #[arg(long)]
     pub branch: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct ResolveArgs {
+    /// Capture the current fix and advance to the next conflict — or, when the stack is clean,
+    /// finish: return to the branch you started on and resume the sync.
+    #[arg(long = "continue", conflicts_with_all = ["abort", "interactive"])]
+    pub cont: bool,
+    /// Give up: undo the sync and discard the resolution, restoring the pre-sync state.
+    #[arg(long)]
+    pub abort: bool,
+    /// Resolve the current conflict with your configured merge tool (one file at a time), instead
+    /// of hand-editing the markers.
+    #[arg(short, long, conflicts_with = "abort")]
+    pub interactive: bool,
 }
 
 #[derive(Args, Debug)]
