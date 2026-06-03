@@ -59,6 +59,14 @@ async fn build_two_branch_stack(h: &mut RepoWithRemote) {
     h.engine.commit("feat-b: bravo").await.unwrap();
 }
 
+async fn build_three_branch_stack(h: &mut RepoWithRemote) {
+    build_two_branch_stack(h).await;
+    let root = h.repo.path().to_path_buf();
+    h.engine.branch_create("feat-c", true).await.unwrap();
+    write(&root, "c.txt", "charlie\n");
+    h.engine.commit("feat-c: charlie").await.unwrap();
+}
+
 #[tokio::test]
 async fn sync_after_squash_merge_of_bottom() {
     let mut h = setup_with_remote().await;
@@ -93,6 +101,89 @@ async fn sync_after_squash_merge_of_bottom() {
     assert!(!h.engine.vcs().bookmarks().await.unwrap().iter().any(|b| b.name == "feat-a"));
     // feat-b's PR retargeted to trunk.
     assert_eq!(fake.pr_for("feat-b").unwrap().base, "main");
+}
+
+#[tokio::test]
+async fn sync_keeps_merged_prs_in_the_nav_comment() {
+    // After a PR merges and drops out of the live stack, its entry must REMAIN in the surviving
+    // PRs' stack-navigation comment — people should still see the entire stack history.
+    let mut h = setup_with_remote().await;
+    build_two_branch_stack(&mut h).await;
+    let fake = Arc::new(FakeForge::new());
+    h.engine.set_forge(Box::new(SharedForge(fake.clone())));
+    h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
+
+    let pr_a = fake.pr_for("feat-a").unwrap().number;
+    let pr_b = fake.pr_for("feat-b").unwrap().number;
+
+    // Squash-land feat-a, then sync.
+    let work = clone_remote(&h);
+    git(work.path(), &["checkout", "main"]);
+    write(work.path(), "a.txt", "alpha\n");
+    git(work.path(), &["add", "a.txt"]);
+    git(work.path(), &["commit", "-m", "feat-a (squash #1)"]);
+    git(work.path(), &["push", "origin", "main"]);
+    fake.set_merged("feat-a");
+    h.engine.sync(true).await.unwrap();
+
+    // feat-a is gone from the live stack...
+    let names: Vec<_> =
+        h.engine.derive_stack().await.unwrap().branches.iter().map(|b| b.name.clone()).collect();
+    assert_eq!(names, ["feat-b"], "feat-a abandoned; feat-b survives");
+
+    // ...but its PR still appears in the survivor's nav comment (exactly one, no duplication).
+    let nav = fake.comments_on(pr_b);
+    assert_eq!(nav.len(), 1, "exactly one nav comment on feat-b");
+    assert!(nav[0].contains(&format!("#{pr_a}")), "merged feat-a PR still listed: {}", nav[0]);
+    assert!(nav[0].contains(&format!("#{pr_b}")), "feat-b PR listed: {}", nav[0]);
+}
+
+#[tokio::test]
+async fn nav_history_accumulates_across_successive_merges() {
+    // The merged-PR history must persist across syncs: merge the bottom, sync, merge the new
+    // bottom, sync — the lone survivor's nav still shows ALL the merged PRs, in order.
+    let mut h = setup_with_remote().await;
+    build_three_branch_stack(&mut h).await;
+    let fake = Arc::new(FakeForge::new());
+    h.engine.set_forge(Box::new(SharedForge(fake.clone())));
+    h.engine.submit(jjk::engine::SubmitScope::Stack).await.unwrap();
+
+    let pr_a = fake.pr_for("feat-a").unwrap().number;
+    let pr_b = fake.pr_for("feat-b").unwrap().number;
+    let pr_c = fake.pr_for("feat-c").unwrap().number;
+
+    let work = clone_remote(&h);
+
+    // Round 1: squash-land feat-a (the bottom).
+    git(work.path(), &["checkout", "main"]);
+    write(work.path(), "a.txt", "alpha\n");
+    git(work.path(), &["add", "a.txt"]);
+    git(work.path(), &["commit", "-m", "feat-a (squash)"]);
+    git(work.path(), &["push", "origin", "main"]);
+    fake.set_merged("feat-a");
+    h.engine.sync(true).await.unwrap();
+
+    let nav_c = fake.comments_on(pr_c).pop().unwrap();
+    for pr in [pr_a, pr_b, pr_c] {
+        assert!(nav_c.contains(&format!("#{pr}")), "round 1: feat-c nav shows #{pr}: {nav_c}");
+    }
+
+    // Round 2: squash-land feat-b (now the bottom).
+    write(work.path(), "b.txt", "bravo\n");
+    git(work.path(), &["add", "b.txt"]);
+    git(work.path(), &["commit", "-m", "feat-b (squash)"]);
+    git(work.path(), &["push", "origin", "main"]);
+    fake.set_merged("feat-b");
+    h.engine.sync(true).await.unwrap();
+
+    // Only feat-c survives, yet its nav still lists all three PRs — history accumulated.
+    let names: Vec<_> =
+        h.engine.derive_stack().await.unwrap().branches.iter().map(|b| b.name.clone()).collect();
+    assert_eq!(names, ["feat-c"], "only feat-c survives");
+    let nav_c = fake.comments_on(pr_c).pop().unwrap();
+    for pr in [pr_a, pr_b, pr_c] {
+        assert!(nav_c.contains(&format!("#{pr}")), "round 2: feat-c nav still shows #{pr}: {nav_c}");
+    }
 }
 
 #[tokio::test]

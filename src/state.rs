@@ -49,6 +49,22 @@ pub struct BranchEntry {
     /// Whether this branch is stack-tracked (created via `branch create`/`track`).
     #[serde(default)]
     pub tracked: bool,
+    /// PRs that have merged *below* this branch, in bottom→top stack order. Kept so the
+    /// stack-navigation comment can keep showing the full stack history after merged branches are
+    /// reconciled away (their jj change/bookmark is gone, but the PR record lives on here). Travels
+    /// up the stack: when a branch merges, its history + itself move onto the surviving branch above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_downstack: Vec<MergedPr>,
+}
+
+/// A PR that has merged and been reconciled out of the live stack, retained only so it can still be
+/// listed in the stack-navigation comment (the entire stack history stays visible).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergedPr {
+    /// The branch name the PR was opened from (for ordering/diagnostics; the bookmark is gone).
+    pub name: String,
+    /// PR number on the forge.
+    pub pr: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

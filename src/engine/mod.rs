@@ -7,7 +7,7 @@ use crate::error::{JjkError, Result};
 use crate::forge::Forge;
 use crate::model::{ChangeId, CommitInfo, PrRef, PrState};
 use crate::prompt::{AutoFill, PrDraft, Prompter};
-use crate::state::State;
+use crate::state::{MergedPr, State};
 use crate::text::plural;
 use crate::vcs::{CommitScope, PushOpts, Vcs};
 use stack::{Branch, Stack};
@@ -1714,27 +1714,42 @@ impl Engine {
             .iter()
             .filter_map(|it| self.state.pr_of(&it.name).map(|pr| (it.name.clone(), pr)))
             .collect();
-        self.refresh_nav_comments(&stack_prs, yuji).await?;
+        // Prepend any PRs that merged below the bottom of the stack so the nav comment shows the full
+        // stack history (consistent with sync) — those branches are gone, so only `stack_prs` is
+        // written, but the comment body lists them too.
+        let history = plan.first().map(|it| self.merged_history(&it.name)).unwrap_or_default();
+        let full_prs: Vec<(String, u64)> =
+            history.into_iter().chain(stack_prs.iter().cloned()).collect();
+        self.refresh_nav_comments(&full_prs, &stack_prs, yuji).await?;
         Ok(report)
     }
 
-    /// Refresh the stack-navigation comment for every PR in `stack_prs` (`(branch, pr)`, bottom→top)
-    /// and persist each comment's forge id in state. Seeding from the cached ids lets later runs
-    /// edit comments in place — skipping the `find_comment` lookup (which paginates all of a PR's
-    /// comments), like git-spice. Saves state and returns the number of comments touched.
-    async fn refresh_nav_comments(&mut self, stack_prs: &[(String, u64)], yuji: bool) -> Result<usize> {
+    /// Refresh the stack-navigation comment on each PR in `targets` (`(branch, pr)`, bottom→top) and
+    /// persist each comment's forge id in state. The comment *body* lists every PR in `full_prs` —
+    /// the entire stack including already-merged PRs, so the full stack history stays visible — while
+    /// only `targets` (the branches that still exist in state) actually have their comments written;
+    /// merged PRs' own comments are left frozen at their last update. `full_prs` must contain every
+    /// `targets` PR. Seeding from the cached ids lets later runs edit comments in place — skipping the
+    /// `find_comment` lookup (which paginates all of a PR's comments), like git-spice. Saves state and
+    /// returns the number of comments touched.
+    async fn refresh_nav_comments(
+        &mut self,
+        full_prs: &[(String, u64)],
+        targets: &[(String, u64)],
+        yuji: bool,
+    ) -> Result<usize> {
         // Seed the per-PR comment ids we already know (pr → comment id) from state.
-        let known: std::collections::HashMap<u64, u64> = stack_prs
+        let known: std::collections::HashMap<u64, u64> = targets
             .iter()
             .filter_map(|(name, pr)| self.state.nav_comment_of(name).map(|cid| (*pr, cid)))
             .collect();
-        let touched = self.upsert_nav_comments(stack_prs, yuji, &known).await?;
+        let touched = self.upsert_nav_comments(full_prs, targets, yuji, &known).await?;
         if touched.is_empty() {
             return Ok(0);
         }
         // Persist the (possibly newly created) comment ids back to state, keyed by branch.
         let name_of: std::collections::HashMap<u64, &str> =
-            stack_prs.iter().map(|(n, pr)| (*pr, n.as_str())).collect();
+            targets.iter().map(|(n, pr)| (*pr, n.as_str())).collect();
         for (pr, cid) in &touched {
             if let Some(name) = name_of.get(pr) {
                 self.state.branch_mut(name).nav_comment_id = Some(*cid);
@@ -1744,28 +1759,45 @@ impl Engine {
         Ok(touched.len())
     }
 
-    /// Upsert the stack-navigation comment on each PR in `prs` (bottom→top order). Runs across PRs
-    /// concurrently (they target different PRs), while each PR's update/find/create stays ordered,
-    /// so it's idempotent — one comment per PR, never duplicated. `known` supplies comment ids
-    /// already known (cached in state) to skip the `find_comment` lookup; if that cached id is stale
-    /// (comment deleted), it self-heals by rediscovering or recreating the comment — like git-spice.
-    /// Returns `(pr, comment_id)` for every PR touched so callers can persist them. No-op (`[]`) for
-    /// fewer than 2 PRs — a lone PR has no stack to navigate.
+    /// PRs recorded as merged below `branch`, bottom→top, as `(name, pr)` — the stack-navigation
+    /// history kept so the comment shows the full stack even after merged branches are reconciled
+    /// away. Empty if the branch is unknown or carries no merged history.
+    fn merged_history(&self, branch: &str) -> Vec<(String, u64)> {
+        self.state
+            .branches
+            .get(branch)
+            .map(|e| e.merged_downstack.iter().map(|m| (m.name.clone(), m.pr)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Upsert the stack-navigation comment on each PR in `targets` (bottom→top order). Each comment's
+    /// body lists every PR in `full_prs` (the whole stack, merged PRs included), with this target
+    /// marked as current. Runs across PRs concurrently (they target different PRs), while each PR's
+    /// update/find/create stays ordered, so it's idempotent — one comment per PR, never duplicated.
+    /// `known` supplies comment ids already known (cached in state) to skip the `find_comment` lookup;
+    /// if that cached id is stale (comment deleted), it self-heals by rediscovering or recreating the
+    /// comment — like git-spice. Returns `(pr, comment_id)` for every PR touched so callers can
+    /// persist them. No-op (`[]`) when the rendered stack has fewer than 2 PRs — nothing to navigate.
     async fn upsert_nav_comments(
         &self,
-        prs: &[(String, u64)],
+        full_prs: &[(String, u64)],
+        targets: &[(String, u64)],
         yuji: bool,
         known: &std::collections::HashMap<u64, u64>,
     ) -> Result<Vec<(u64, u64)>> {
-        if prs.len() < 2 {
+        if full_prs.len() < 2 {
             return Ok(Vec::new());
         }
+        // Where each PR sits in the rendered stack, so a target's comment can mark itself current.
+        let idx_of: std::collections::HashMap<u64, usize> =
+            full_prs.iter().enumerate().map(|(i, (_, pr))| (*pr, i)).collect();
         let forge = self.forge().await?;
-        let tasks = prs.iter().enumerate().map(|(idx, (_, pr))| {
+        let tasks = targets.iter().filter_map(|(_, pr)| {
             let pr = *pr;
-            let body = nav_comment_body(prs, idx, yuji);
+            let idx = *idx_of.get(&pr)?;
+            let body = nav_comment_body(full_prs, idx, yuji);
             let known_id = known.get(&pr).copied();
-            async move {
+            Some(async move {
                 // Fast path: edit the comment we already know about. If that fails (e.g. the author
                 // deleted it), fall back to discovering or recreating it.
                 if let Some(id) = known_id {
@@ -1781,7 +1813,7 @@ impl Engine {
                     None => forge.create_comment(pr, &body).await?,
                 };
                 Ok::<(u64, u64), anyhow::Error>((pr, id))
-            }
+            })
         });
         futures::future::try_join_all(tasks).await
     }
@@ -1872,6 +1904,36 @@ impl Engine {
 
         // 4. Reconcile each merged branch.
         let post = self.derive_stack().await?;
+        // Before removing them, preserve the merged PRs in the stack-navigation history so the nav
+        // comment keeps showing the full stack. Walk the pre-fetch stack bottom→top, accumulating the
+        // run of merged branches at the bottom — plus any history they already carried — and hand it
+        // to the first surviving branch above them (the new bottom of the stack). `nav_bottom` is that
+        // survivor (or just the existing bottom when nothing merged), the branch whose entry holds the
+        // accumulated history for rendering below.
+        let merged_set: std::collections::HashSet<&str> =
+            merged_names.iter().map(String::as_str).collect();
+        let mut carried: Vec<MergedPr> = Vec::new();
+        let mut nav_bottom: Option<String> = None;
+        for b in &pre.branches {
+            if merged_set.contains(b.name.as_str()) {
+                if let Some(e) = self.state.branches.get(&b.name) {
+                    carried.extend(e.merged_downstack.iter().cloned());
+                }
+                if let Some(pr) = b.pr {
+                    carried.push(MergedPr { name: b.name.clone(), pr });
+                }
+            } else {
+                nav_bottom = Some(b.name.clone());
+                break;
+            }
+        }
+        if !carried.is_empty() {
+            if let Some(nb) = nav_bottom.as_deref() {
+                let entry = self.state.branch_mut(nb);
+                carried.append(&mut entry.merged_downstack);
+                entry.merged_downstack = carried;
+            }
+        }
         for name in &merged_names {
             match post.branch(name) {
                 // Squash landing: the branch is now empty & mutable above trunk → abandon it,
@@ -1969,16 +2031,22 @@ impl Engine {
             }
 
             // Refresh the stack-navigation comments for the (now reconciled) surviving stack. sync
-            // changes the stack — merged branches drop out, bases move — so the comments would
-            // otherwise go stale; this also surfaces the opt-in flourish when newly configured.
-            let stack_prs: Vec<(String, u64)> = survivors
+            // changes the stack — bases move, the tip advances — so the comments would otherwise go
+            // stale; this also surfaces the opt-in flourish when newly configured. Merged branches no
+            // longer exist in jj, but we prepend their PRs (recorded on the bottom survivor's nav
+            // history) so the comment keeps showing the entire stack history; only the survivors'
+            // comments are written — the merged PRs' comments stay frozen at their last update.
+            let survivor_prs: Vec<(String, u64)> = survivors
                 .branches
                 .iter()
                 .filter(|b| b.tracked)
                 .filter_map(|b| b.pr.map(|pr| (b.name.clone(), pr)))
                 .collect();
+            let history = nav_bottom.as_deref().map(|nb| self.merged_history(nb)).unwrap_or_default();
+            let full_prs: Vec<(String, u64)> =
+                history.into_iter().chain(survivor_prs.iter().cloned()).collect();
             let yuji = self.vcs.config_get(YUJI_KEY).await?.as_deref() == Some(YUJI_VALUE);
-            self.refresh_nav_comments(&stack_prs, yuji).await?;
+            self.refresh_nav_comments(&full_prs, &survivor_prs, yuji).await?;
         }
 
         self.state.save(&self.root)?;
