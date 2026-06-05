@@ -33,6 +33,31 @@ main
 - **Conflicts never stop the world.** They live inside commits; you resolve once and the fix
   propagates upstack.
 - **Parallel worktrees** for working several branches at once, and `jjk undo` for anything.
+- **Domain Expansion** (experimental): work on a single branch and let an LLM split it into a
+  reviewable stack of PRs — see [Two ways to stack](#two-ways-to-stack).
+
+## Two ways to stack
+
+jjk gives you two workflows for building a stack — they share all the same submit / review / sync
+machinery, they just differ in who draws the PR boundaries:
+
+- **Manual** — you create branches and commit to them yourself, one PR per branch (the usage below).
+- **Automatic — Domain Expansion** (🧪 experimental) — you do all your work on a *single* branch and
+  jjk uses an LLM (Claude) to decompose it into an ordered stack of small PRs. You review (and can
+  edit) the proposed split, then address feedback by editing that one branch and re-syncing — no
+  juggling branches.
+
+  ```bash
+  jjk branch create my-feature        # work on one branch
+  # ...edit, jjk commit, edit, jjk commit...
+  jjk domain expansion                # turn on auto-stacking (mode: change)
+  jjk submit                          # split it → review → open a stacked PR per piece
+  # ...address review on the same branch, jjk commit...
+  jjk sync                            # re-split; existing PRs stay put
+  ```
+
+  Needs `ANTHROPIC_API_KEY`. Full details in the
+  [Domain Expansion guide](https://ethan.website/jjk/domain-expansion).
 
 ## Installation
 

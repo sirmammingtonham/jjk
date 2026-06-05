@@ -79,3 +79,23 @@ description: Every jjk command at a glance.
 | `jjk worktree remove <name>` | Stop tracking a workspace (files are left on disk). |
 
 The current branch is tracked **per workspace**; stale working copies are recovered automatically.
+
+## Domain Expansion (automatic stacking)
+
+Work on one branch and let an LLM split it into a stack. See the
+[Domain Expansion guide](/domain-expansion) for the full workflow.
+
+| Command | What it does |
+| --- | --- |
+| `jjk domain expansion` | Activate auto-stacking on the current branch (the *monolith*). Flags: `--mode feature\|change\|slice` (default `change`), `--instruction "<text>"`, `--verify "<cmd>"` (per-layer build gate), `--model <auto\|opus\|sonnet\|haiku\|id>`, `--effort <auto\|off\|low\|high\|max\|N>`. Records the mode; the split runs on the next `submit`/`sync`/`expand`. |
+| `jjk domain status` | Read-only: the monolith ↔ layers map, PR numbers, and ⚠ flags for layers the splitter judged risky. |
+| `jjk domain explain [<layer>]` | Read-only: each layer's grouping rationale and compat notes; with a slug, also its full PR body. |
+| `jjk domain expand [--preview]` | (Re)build the layer branches locally for inspection — no PRs. `--preview` just prints the proposed split. |
+| `jjk domain collapse` | Deactivate: forget the `jjk/layer/*` branches; the monolith is untouched. |
+| `jjk submit --no-review` / `-y` | In Domain Expansion mode, accept the proposed split without the interactive review gate. |
+
+When Domain Expansion is active, `jjk submit` (re)splits the monolith and opens a PR per layer, and
+`jjk sync` rebases the monolith onto trunk, re-splits, and updates the PRs in place. Needs
+`ANTHROPIC_API_KEY`; without it a deterministic offline split is used. Overrides:
+`JJK_LLM_MODEL` / `JJK_LLM_THINKING` (per-run) beat `--model`/`--effort` (per-monolith) beat
+`state.toml` `[config] llm_model` / `llm_thinking` (per-repo).

@@ -17,6 +17,7 @@ export default defineConfig({
   topNav: [
     { text: 'Quickstart', link: '/quickstart' },
     { text: 'Commands', link: '/commands' },
+    { text: 'Domain Expansion', link: '/domain-expansion' },
     { text: 'jj', link: 'https://jj-vcs.github.io/jj/' },
   ],
   socials: [{ icon: 'github', link: 'https://github.com/sirmammingtonham/jjk' }],
@@ -34,7 +35,8 @@ export default defineConfig({
       text: 'Guide',
       collapsed: false,
       items: [
-        { text: 'The stacked-PR workflow', link: '/workflow' },
+        { text: 'Stacked-PR workflow (manual)', link: '/workflow' },
+        { text: 'Domain Expansion (automatic)', link: '/domain-expansion' },
         { text: 'Command reference', link: '/commands' },
       ],
     },

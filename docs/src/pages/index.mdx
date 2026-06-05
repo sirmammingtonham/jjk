@@ -75,9 +75,23 @@ and jj does the rebasing, conflict storage, and identity tracking for free.
 main
 ```
 
+## Two ways to stack
+
+jjk gives you two workflows for building a stack, and they share all the same submit/sync/review
+machinery:
+
+- **Manual** — you create branches and commit to them yourself, one PR per branch. You draw the
+  boundaries. This is the [stacked-PR workflow](/workflow).
+- **Automatic — [Domain Expansion](/domain-expansion)** — you do all your work on a *single* branch
+  and an LLM splits it into a reviewable stack of PRs. You review (and can edit) the proposed split,
+  but never manage the branches. Address feedback by editing the one branch and re-syncing.
+
+Use whichever fits how you think — branch-as-you-go, or code-first-then-split.
+
 ## Next steps
 
 - [Installation](/installation): get the `jjk` binary.
 - [Quickstart](/quickstart): your first stack in two minutes.
-- [The stacked-PR workflow](/workflow): submit, review, merge, sync.
+- [The stacked-PR workflow](/workflow): the manual flow — submit, review, merge, sync.
+- [Domain Expansion](/domain-expansion): the automatic flow — let an LLM split one branch into a stack.
 - [Command reference](/commands): every command at a glance.
