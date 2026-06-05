@@ -13,7 +13,7 @@ use crate::model::{DiffLine, FileChangeKind, FileDiff, Hunk};
 ///
 /// Added files pass `base = ""`. Final-newline handling is best-effort (assume newline-terminated);
 /// any mismatch is caught by the `trees_equal` gate and absorbed by the remainder.
-pub fn apply_hunks(base: &str, hunks: &[&Hunk]) -> Result<String> {
+pub(crate) fn apply_hunks(base: &str, hunks: &[&Hunk]) -> Result<String> {
     let (base_lines, _trailing) = split_lines(base);
     // Apply in ascending original-line order.
     let mut order: Vec<&&Hunk> = hunks.iter().collect();
@@ -96,7 +96,7 @@ fn split_lines(s: &str) -> (Vec<&str>, bool) {
 // ---- reconstruction support -------------------------------------------------------------------
 
 /// What to do with one file when materializing a layer's cumulative content.
-pub enum Materialized {
+pub(crate) enum Materialized {
     /// Write this exact content at the file's (new) path.
     Write(String),
     /// Remove the file.
@@ -108,7 +108,7 @@ pub enum Materialized {
 /// Compute a file's content at a layer, given its trunk `base` (or `None` for an added file) and the
 /// cumulative set of included hunk indices for it. Add/modify → apply the included hunks; delete →
 /// remove; binary → skip (the remainder safety net handles it).
-pub fn materialize_file(base: Option<&str>, f: &FileDiff, included: &[usize]) -> Result<Materialized> {
+pub(crate) fn materialize_file(base: Option<&str>, f: &FileDiff, included: &[usize]) -> Result<Materialized> {
     match f.change {
         FileChangeKind::Binary => Ok(Materialized::Skip),
         FileChangeKind::Deleted => Ok(Materialized::Delete),

@@ -429,8 +429,8 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         Command::Domain(DomainCmd::Explain(args)) => {
             render::print_report(&engine.domain_explain(args.layer).await?);
         }
-        Command::Domain(DomainCmd::Expand(args)) => {
-            render::print_report(&engine.domain_expand(args.preview).await?);
+        Command::Domain(DomainCmd::Rebuild(args)) => {
+            render::print_report(&engine.domain_rebuild(args.preview).await?);
         }
         Command::Domain(DomainCmd::Collapse) => {
             render::print_report(&engine.domain_collapse().await?);

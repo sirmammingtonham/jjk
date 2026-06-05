@@ -281,7 +281,7 @@ impl Usage {
 }
 
 /// Render the system prompt from `prompts/system.md.j2`.
-pub fn render_system(mode: &str, instruction: Option<&str>) -> Result<String> {
+pub(crate) fn render_system(mode: &str, instruction: Option<&str>) -> Result<String> {
     render("system", include_str!("prompts/system.md.j2"), minijinja::context! {
         mode => mode,
         instruction => instruction,

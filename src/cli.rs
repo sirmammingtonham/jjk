@@ -107,7 +107,7 @@ pub enum DomainCmd {
     /// Explain each layer's contents and the split rationale (read-only).
     Explain(DomainExplainArgs),
     /// (Re)build the layer stack locally for inspection — no PRs.
-    Expand(DomainExpandArgs),
+    Rebuild(DomainRebuildArgs),
     /// Deactivate: forget the layer bookmarks, keep the monolith.
     Collapse,
 }
@@ -140,7 +140,7 @@ pub struct DomainExplainArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct DomainExpandArgs {
+pub struct DomainRebuildArgs {
     /// Print the proposed split without materializing layer bookmarks.
     #[arg(long)]
     pub preview: bool,
@@ -231,7 +231,7 @@ pub struct SubmitArgs {
     #[arg(long)]
     pub draft: bool,
     /// Domain expansion: accept the proposed split without the interactive review gate.
-    #[arg(long = "no-review", visible_alias = "yes", short = 'y')]
+    #[arg(long = "no-review", short = 'y')]
     pub no_review: bool,
 }
 

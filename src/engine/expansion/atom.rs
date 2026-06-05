@@ -16,7 +16,7 @@ use crate::model::{DiffLine, FileChangeKind, FileDiff, Hunk};
 /// atom (they can't be sub-split). Carries cheap, advisory `defs`/`uses` for dependency hints and a
 /// one-line `gist` — never raw code.
 #[derive(Debug, Clone)]
-pub struct Atom {
+pub(crate) struct Atom {
     /// Stable content hash (hex) — identity for incremental re-split matching.
     pub id: String,
     pub path: String,
@@ -38,14 +38,14 @@ pub struct Atom {
 /// A dependency/affinity hint between two atoms (by index). Advisory input to the LLM, not a
 /// constraint — the LLM may group however it judges best.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Edge {
+pub(crate) struct Edge {
     pub from: usize,
     pub to: usize,
     pub kind: EdgeKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdgeKind {
+pub(crate) enum EdgeKind {
     /// `from` references a symbol `to` defines (suggests `to` in `from`'s layer or below).
     DefUse,
     /// Same file (affinity).
@@ -53,7 +53,7 @@ pub enum EdgeKind {
 }
 
 /// Extract atoms from a structured diff (`Vcs::diff_hunks` output).
-pub fn extract_atoms(files: &[FileDiff]) -> Vec<Atom> {
+pub(crate) fn extract_atoms(files: &[FileDiff]) -> Vec<Atom> {
     let mut atoms = Vec::new();
     for (fi, f) in files.iter().enumerate() {
         let per_hunk = matches!(f.change, FileChangeKind::Modified) && f.hunks.len() > 1;
@@ -157,7 +157,7 @@ fn atom_hash(path: &str, hunks: &[&Hunk]) -> String {
 }
 
 /// Build advisory dependency/affinity edges over the atoms. `O(n²)`; fine for review-sized diffs.
-pub fn build_edges(atoms: &[Atom]) -> Vec<Edge> {
+pub(crate) fn build_edges(atoms: &[Atom]) -> Vec<Edge> {
     let mut edges = Vec::new();
     for (ai, a) in atoms.iter().enumerate() {
         for (bi, b) in atoms.iter().enumerate() {

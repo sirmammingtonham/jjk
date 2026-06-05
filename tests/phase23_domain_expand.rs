@@ -109,7 +109,7 @@ async fn preview_covers_every_changed_file() {
     // Force the offline splitter so the test never reaches the network.
     e.set_splitter(Box::new(FakeSplitter::deterministic()));
 
-    let report = e.domain_expand(/*preview=*/ true).await.unwrap();
+    let report = e.domain_rebuild(/*preview=*/ true).await.unwrap();
     let text = report.notes.join("\n");
 
     assert!(text.contains("proposed split"), "got:\n{text}");
@@ -141,7 +141,7 @@ async fn engine_respects_the_splitter_grouping_without_reclustering() {
     };
     e.set_splitter(Box::new(FakeSplitter::scripted(plan)));
 
-    let report = e.domain_expand(true).await.unwrap();
+    let report = e.domain_rebuild(true).await.unwrap();
     let text = report.notes.join("\n");
     assert!(text.contains("1 layer (bottom→top)"), "got:\n{text}");
     assert!(text.contains("All the work"));
@@ -185,7 +185,7 @@ async fn reconstruct_builds_a_tree_equivalent_stack() {
         ],
     };
     e.set_splitter(Box::new(FakeSplitter::scripted(plan)));
-    e.domain_expand(/*preview=*/ false).await.unwrap();
+    e.domain_rebuild(/*preview=*/ false).await.unwrap();
 
     // Two layer bookmarks exist.
     let bms = e.vcs().bookmarks().await.unwrap();
@@ -455,7 +455,7 @@ async fn hierarchical_split_for_large_changesets() {
     e.domain_activate(Mode::Change, None, None, None, None).await.unwrap();
     e.set_splitter(Box::new(OneLayerSplitter));
 
-    e.domain_expand(/*preview=*/ false).await.unwrap();
+    e.domain_rebuild(/*preview=*/ false).await.unwrap();
 
     let st = ExpansionState::load(&root).unwrap().unwrap();
     assert_eq!(st.layers.len(), 2, "two buckets → two layers (one per bucket)");
@@ -482,7 +482,7 @@ async fn verify_passing_keeps_all_layers() {
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
     })));
-    let report = e.domain_expand(false).await.unwrap().notes.join("\n");
+    let report = e.domain_rebuild(false).await.unwrap().notes.join("\n");
     assert!(report.contains("verified all layers"), "got:\n{report}");
     let st = ExpansionState::load(&root).unwrap().unwrap();
     assert_eq!(st.layers.len(), 2, "both layers kept when each builds");
@@ -499,7 +499,7 @@ async fn verify_failure_folds_layers_forward() {
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
     })));
-    let report = e.domain_expand(false).await.unwrap().notes.join("\n");
+    let report = e.domain_rebuild(false).await.unwrap().notes.join("\n");
     assert!(report.contains("merging into the next layer"), "got:\n{report}");
 
     // The failing bottom layer is folded into the last → a single sealed layer covering everything.
@@ -551,7 +551,7 @@ async fn status_and_explain_surface_compat_and_rationale() {
         }],
     };
     e.set_splitter(Box::new(FakeSplitter::scripted(plan)));
-    e.domain_expand(false).await.unwrap();
+    e.domain_rebuild(false).await.unwrap();
 
     let status = e.domain_status().await.unwrap().notes.join("\n");
     assert!(status.contains('⚠'), "status flags the risky layer: {status}");

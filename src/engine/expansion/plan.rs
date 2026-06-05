@@ -9,7 +9,7 @@ use super::{Mode, PersistedLayer};
 
 /// Everything `compute_split` produces: the source diff + atoms and the (completeness-repaired)
 /// plan, plus the trunk/monolith anchors needed for reconstruction. Atom labels are `a{index}`.
-pub struct ResolvedSplit {
+pub(crate) struct ResolvedSplit {
     pub atoms: Vec<Atom>,
     pub files: Vec<FileDiff>,
     pub trunk: ChangeId,
@@ -18,18 +18,18 @@ pub struct ResolvedSplit {
 }
 
 /// Atom label used in the LLM payload / plan: `a{index}`.
-pub fn atom_label(index: usize) -> String {
+pub(crate) fn atom_label(index: usize) -> String {
     format!("a{index}")
 }
 
 /// Parse an `a{index}` label back to an atom index.
-pub fn label_index(label: &str) -> Option<usize> {
+pub(crate) fn label_index(label: &str) -> Option<usize> {
     label.strip_prefix('a').and_then(|s| s.parse().ok())
 }
 
 /// Build the compressed, code-free LLM payload from the sketch. Full hunk text is stashed in
 /// `details` (served on demand via the `get_atom_detail` tool), never in the catalog.
-pub fn build_split_input(
+pub(crate) fn build_split_input(
     mode: Mode,
     instruction: Option<String>,
     atoms: &[Atom],
@@ -77,7 +77,7 @@ pub fn build_split_input(
 }
 
 /// The full diff text for one atom (served on demand to the LLM).
-pub fn detail_text(files: &[FileDiff], atom: &Atom) -> String {
+pub(crate) fn detail_text(files: &[FileDiff], atom: &Atom) -> String {
     let f = &files[atom.file_idx];
     let mut s = format!("{} {}\n", change_word(atom.change), f.path);
     for &hi in &atom.hunks {
@@ -102,7 +102,7 @@ pub fn detail_text(files: &[FileDiff], atom: &Atom) -> String {
 /// unassigned into a trailing `remainder` layer. Returns the swept-up (previously unassigned)
 /// labels for reporting. This is the only correctness gate at the plan level — the LLM's grouping
 /// and ordering are otherwise accepted as-is.
-pub fn repair_completeness(plan: &mut SplitPlan, atom_count: usize) -> Vec<String> {
+pub(crate) fn repair_completeness(plan: &mut SplitPlan, atom_count: usize) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for layer in &mut plan.layers {
         layer.atoms.retain(|l| {
@@ -132,7 +132,7 @@ pub fn repair_completeness(plan: &mut SplitPlan, atom_count: usize) -> Vec<Strin
 /// Stabilize a freshly-computed plan's layer slugs by matching each layer to an existing persisted
 /// layer with the greatest atom-hash (Jaccard) overlap, so a surviving layer keeps its
 /// bookmark→PR→nav-comment across an incremental re-split. Mutates `plan` layer slugs in place.
-pub fn match_layers(plan: &mut SplitPlan, existing: &[PersistedLayer], atoms: &[Atom]) {
+pub(crate) fn match_layers(plan: &mut SplitPlan, existing: &[PersistedLayer], atoms: &[Atom]) {
     if existing.is_empty() {
         return;
     }
@@ -183,7 +183,7 @@ pub fn match_layers(plan: &mut SplitPlan, existing: &[PersistedLayer], atoms: &[
 /// Connected components of the atoms under the dependency/affinity edges (union-find). Each is a
 /// list of atom indices; components are ordered by first appearance. Hard-connected atoms stay
 /// together, so splitting these across buckets never separates a co-dependent group.
-pub fn components(n: usize, edges: &[Edge]) -> Vec<Vec<usize>> {
+pub(crate) fn components(n: usize, edges: &[Edge]) -> Vec<Vec<usize>> {
     let mut parent: Vec<usize> = (0..n).collect();
     fn find(p: &mut [usize], x: usize) -> usize {
         let mut r = x;
@@ -227,7 +227,7 @@ pub fn components(n: usize, edges: &[Edge]) -> Vec<Vec<usize>> {
 
 /// Pack whole components into buckets of at most `max` atoms (a component larger than `max` becomes
 /// its own bucket). Used to bound each LLM call's catalog for very large changesets.
-pub fn bucket_components(n: usize, edges: &[Edge], max: usize) -> Vec<Vec<usize>> {
+pub(crate) fn bucket_components(n: usize, edges: &[Edge], max: usize) -> Vec<Vec<usize>> {
     let mut buckets: Vec<Vec<usize>> = Vec::new();
     let mut cur: Vec<usize> = Vec::new();
     for comp in components(n, edges) {
@@ -246,7 +246,7 @@ pub fn bucket_components(n: usize, edges: &[Edge], max: usize) -> Vec<Vec<usize>
 }
 
 /// The subset of `edges` internal to `bucket`, remapped to the bucket's local atom indices.
-pub fn sub_edges(edges: &[Edge], bucket: &[usize]) -> Vec<Edge> {
+pub(crate) fn sub_edges(edges: &[Edge], bucket: &[usize]) -> Vec<Edge> {
     let local: std::collections::HashMap<usize, usize> =
         bucket.iter().enumerate().map(|(l, &g)| (g, l)).collect();
     edges
@@ -265,7 +265,7 @@ pub fn sub_edges(edges: &[Edge], bucket: &[usize]) -> Vec<Edge> {
 /// Rewrite a per-bucket sub-plan's labels from bucket-local back to global atom labels, and prefix
 /// each slug with the bucket index to keep slugs unique across buckets (incremental `match_layers`
 /// re-attaches stable identity afterward, so the prefix doesn't churn PRs).
-pub fn remap_and_prefix(plan: &mut SplitPlan, bucket: &[usize], bucket_idx: usize) {
+pub(crate) fn remap_and_prefix(plan: &mut SplitPlan, bucket: &[usize], bucket_idx: usize) {
     for layer in &mut plan.layers {
         layer.atoms = layer
             .atoms
@@ -280,7 +280,7 @@ pub fn remap_and_prefix(plan: &mut SplitPlan, bucket: &[usize], bucket_idx: usiz
 
 /// Slugs of plan layers that differ from the previous expansion (new layer, or same slug but a
 /// changed atom set) — used to highlight what moved in a re-split's review.
-pub fn changed_layers(plan: &SplitPlan, existing: &[PersistedLayer], atoms: &[Atom]) -> Vec<String> {
+pub(crate) fn changed_layers(plan: &SplitPlan, existing: &[PersistedLayer], atoms: &[Atom]) -> Vec<String> {
     let old: std::collections::HashMap<&str, std::collections::HashSet<&str>> = existing
         .iter()
         .map(|l| {

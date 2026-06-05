@@ -5,8 +5,11 @@ description: Work on one branch and let an LLM split it into a reviewable stack 
 
 # Domain Expansion
 
-> 🧪 **Experimental.** The mechanics (equivalence checks, reconstruction, sync) are solid and
-> tested, but the splitting is LLM-driven, so review the proposed stack before you ship it.
+<img
+  src="https://i.redd.it/4lbra3tlq9ld1.jpeg"
+  alt="jjk"
+  style={{ borderRadius: '12px', marginTop: '1.5rem' }}
+/>
 
 jjk gives you **two ways to build a stack**:
 
@@ -63,7 +66,7 @@ jjk domain expansion [--mode feature|change|slice]
 ```
 
 This records the current branch as the **monolith** (in `.jj/jjk/expansion.json`). No split happens
-yet — the actual decomposition runs on your next `submit` or `sync` (or `domain expand`).
+yet — the actual decomposition runs on your next `submit` or `sync` (or `domain rebuild`).
 
 ### Modes
 
@@ -85,7 +88,7 @@ The splitter operates on what's **committed** to the monolith branch — it diff
 Uncommitted edits live in your working copy *above* the branch tip, so they are **not** included in
 the split.
 
-So before `submit`/`sync`/`expand`, finalize your work with **`jjk commit`** (which advances the
+So before `submit`/`sync`/`rebuild`, finalize your work with **`jjk commit`** (which advances the
 monolith branch to your committed work). A plain `git commit` also works in the colocated repo, but
 `jjk commit` is the clean path and lets `git add` scope a commit.
 
@@ -125,7 +128,7 @@ It's also skipped automatically in non-interactive runs (CI, `--fill`, no TTY).
 Address feedback **on the monolith** — never on the generated layers — then re-run `sync`:
 
 ```bash
-jjk down? no — you're already on the monolith
+# you're already on the monolith — no navigating the stack
 # ...edit, jjk commit -m "address review"...
 jjk sync
 ```
@@ -144,8 +147,8 @@ Everything is verifiable locally; you never have to trust the split blindly.
 jjk domain status              # the monolith ↔ layers map, PR numbers, ⚠ compat flags
 jjk domain explain             # each layer's rationale + any compat notes
 jjk domain explain auth-module # one layer, with its full PR body
-jjk domain expand              # (re)build the layer branches locally — no PRs
-jjk domain expand --preview    # just print the proposed split, build nothing
+jjk domain rebuild              # (re)build the layer branches locally — no PRs
+jjk domain rebuild --preview    # just print the proposed split, build nothing
 jjk ll                         # the generated stack as a tree
 jjk branch diff                # diff a layer against its base
 ```

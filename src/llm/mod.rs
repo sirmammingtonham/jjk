@@ -127,7 +127,7 @@ impl Splitter for FakeSplitter {
 /// A valid-but-unrefined split: union-find connected components over the edges, one layer each,
 /// ordered by first appearance. Used offline / when no API key is present. The point of the feature
 /// is the LLM split; this only guarantees a working stack exists without one.
-pub fn deterministic_split(input: &SplitInput) -> SplitPlan {
+pub(crate) fn deterministic_split(input: &SplitInput) -> SplitPlan {
     let n = input.atoms.len();
     let index: HashMap<&str, usize> = input
         .atoms

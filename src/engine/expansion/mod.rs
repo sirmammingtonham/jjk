@@ -8,9 +8,9 @@
 mod atom;
 mod patch;
 mod plan;
-pub use atom::*;
-pub use patch::*;
-pub use plan::*;
+pub(crate) use atom::*;
+pub(crate) use patch::*;
+pub(crate) use plan::*;
 
 use crate::error::{JjkError, Result};
 use serde::{Deserialize, Serialize};

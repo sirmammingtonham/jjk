@@ -31,7 +31,7 @@ struct Pending {
 impl Engine {
     /// `jjk domain expansion` — activate auto-stacking on the current branch (the monolith). Records
     /// mode/instruction/verify in the sidecar; the actual split happens on the next `submit`/`sync`
-    /// (or `domain expand`).
+    /// (or `domain rebuild`).
     pub async fn domain_activate(
         &mut self,
         mode: Mode,
@@ -82,7 +82,7 @@ impl Engine {
             report.note(format!("verify: {v}"));
         }
         if st.layers.is_empty() {
-            report.note("no layers yet — run `jjk submit` or `jjk domain expand`");
+            report.note("no layers yet — run `jjk submit` or `jjk domain rebuild`");
         } else {
             report.note(format!("{} layer(s) (bottom→top):", st.layers.len()));
             for (i, l) in st.layers.iter().enumerate() {
@@ -552,10 +552,10 @@ impl Engine {
         Ok(Some(top))
     }
 
-    /// `jjk domain expand [--preview]` — (re)build the layer stack locally for inspection (no PRs).
+    /// `jjk domain rebuild [--preview]` — (re)build the layer stack locally for inspection (no PRs).
     /// `--preview` only prints the proposed split; otherwise the layer bookmarks are materialized so
     /// they can be inspected with `jjk ll` / `jjk branch diff` before any submit.
-    pub async fn domain_expand(&mut self, preview: bool) -> Result<Report> {
+    pub async fn domain_rebuild(&mut self, preview: bool) -> Result<Report> {
         let mut report = Report::default();
         let Some(mut st) = ExpansionState::load(&self.root)? else {
             return Err(JjkError::Msg(
@@ -587,7 +587,7 @@ impl Engine {
             return Ok(report);
         };
         if st.layers.is_empty() {
-            report.note("no layers yet — run `jjk submit` or `jjk domain expand`");
+            report.note("no layers yet — run `jjk submit` or `jjk domain rebuild`");
             return Ok(report);
         }
         for (i, l) in st.layers.iter().enumerate() {
