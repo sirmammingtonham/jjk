@@ -3,6 +3,7 @@
 //!
 //! Adapters live in submodules (`jj_cli` binary today; `jj_lib` crate later).
 
+mod diff_parse;
 pub mod jj_cli;
 
 use crate::error::Result;
