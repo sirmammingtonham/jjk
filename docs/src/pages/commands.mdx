@@ -44,7 +44,8 @@ description: Every jjk command at a glance.
 | `jjk branch squash [-m <msg>]` | Collapse all of the current branch's commits into one. |
 | `jjk branch fold` | Fold the current branch into its downstack base (one fewer PR). |
 | `jjk branch split <new> <commit>` | Split the current branch at `<commit>` into two branches (`<new>` takes the lower commits). |
-| `jjk track [name]` / `jjk untrack [name]` | Toggle whether a branch is part of the stack / gets a PR. Defaults to the current branch. |
+| `jjk track [name]` / `jjk untrack [name]` | Toggle whether a branch is part of the stack / gets a PR. Defaults to the current branch. Keeps the commits. |
+| `jjk stack drop` | Remove the **whole local stack**: abandon every tracked branch's commits and heal back to trunk. For cleaning up after the stack's changes already landed via another PR. The remote is untouched; `jjk undo` restores it. Prompts unless `-y`/`--yes`. |
 | `jjk restack` | Re-parent the upstack onto its bases. Usually a no-op (jj auto-rebases). |
 | `jjk up` / `jjk down` | Move one branch away from / toward trunk. Carries any uncommitted changes along. |
 | `jjk top` / `jjk bottom` / `jjk trunk` | Jump to the top / bottom of the stack, or to trunk. Carries any uncommitted changes along. |
@@ -67,7 +68,7 @@ description: Every jjk command at a glance.
 | `jjk upstack submit` / `jjk downstack submit` | Submit only the current branch and everything above / below it. Bases still point at each branch's real downstack branch. |
 | `jjk submit --fill` | Don't prompt — fill new PRs' title/body from the commit messages. (Also implied when stdout isn't a terminal, e.g. CI.) |
 | `jjk submit --draft` | Open newly-created PRs as drafts. Pre-selects the draft prompt; has no effect on PRs that already exist. |
-| `jjk sync` | Fetch, reconcile merged PRs, rebase survivors onto trunk, force-push, and retarget PR bases. Handles squash- and merge-commit landings. |
+| `jjk sync` | Fetch, reconcile merged PRs, rebase survivors onto trunk, force-push, and retarget PR bases. Handles squash- and merge-commit landings. If a branch's PR was **closed without merging** — or its changes already landed in trunk via another PR — sync offers to drop it locally (asks first; declining keeps it). Use `jjk stack drop` to remove the whole stack at once. |
 | `jjk sync -n` / `--no-push` | Reconcile local state only (fetch, drop merged branches, rebase onto trunk). Doesn't push branches or retarget PRs. Faster, and safe when you're not ready to touch the remote. |
 
 ## Worktrees (parallel workspaces)

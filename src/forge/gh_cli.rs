@@ -167,6 +167,10 @@ impl Forge for GhCli {
     }
 
     async fn is_merged(&self, pr: u64) -> Result<bool> {
+        Ok(self.pr_state(pr).await? == PrState::Merged)
+    }
+
+    async fn pr_state(&self, pr: u64) -> Result<PrState> {
         let slug = self.slug()?.to_string();
         let num = pr.to_string();
         let out = self
@@ -178,7 +182,7 @@ impl Forge for GhCli {
             state: String,
         }
         let s: S = serde_json::from_str(&out).context("parsing gh pr view JSON")?;
-        Ok(map_state(&s.state) == PrState::Merged)
+        Ok(map_state(&s.state))
     }
 
     async fn view_pr(&self, pr: u64, web: bool) -> Result<Option<String>> {

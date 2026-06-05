@@ -125,6 +125,36 @@ PRs. Handy after a teammate merges something, when you're not yet ready to updat
 `jjk pull` is the even lighter cousin. It fetches and rebases the stack onto trunk, but does no
 merged-PR detection and no push.
 
+### Closing out a stack early
+
+Sometimes a stack lands **not** through its own PRs. You need to ship now, so you open one PR from
+the top of the stack straight into `main`, merge it, and close the individual stack PRs. Now `main`
+contains all of the stack's changes, but those changes never went through the per-branch PRs — so
+they show up as *closed*, not *merged*.
+
+`sync` detects this. When a branch's PR was **closed without merging**, or when a branch's changes
+already appear in trunk (so it would rebase to nothing), `sync` lists those branches and asks whether
+to drop them from the local stack:
+
+```
+These stack branches look done but weren't cleanly merged:
+  - feat-a (PR closed without merging)
+  - feat-b (changes already in trunk)
+Remove them from the local stack? ...
+```
+
+Answer yes and it abandons those commits and heals the stack back to trunk — so the next `sync` is
+clean. Answer no and they're left untouched. (Non-interactive runs always keep them.)
+
+To skip the per-branch questions and clear the **whole** local stack in one go:
+
+```bash
+jjk stack drop          # abandons every tracked branch's commits, heals to trunk
+```
+
+Either way it's a **local** cleanup — the remote and the closed PRs are untouched, and `jjk undo`
+brings the stack right back if you change your mind.
+
 ## Conflicts
 
 jj stores conflicts inside commits, so a `sync` (or any rebase) **completes and reports** the

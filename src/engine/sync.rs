@@ -37,19 +37,26 @@ impl Engine {
             .await?;
         report.note(format!("fetched {}", self.state.config.remote));
         self.advance_trunk_to_remote(&mut report).await?;
-        // Query merged-state for all candidate PRs concurrently (independent reads by PR number) —
-        // one round-trip instead of N. Order is preserved by zipping back onto `candidates`.
-        let merged_flags = {
+        // Query PR state for all candidates concurrently (independent reads by PR number) — one
+        // round-trip instead of N. Order is preserved by zipping back onto `candidates`. We need
+        // the full state (not just merged) so a PR that was *closed* without merging — or whose
+        // changes landed via a separate PR — can be reconciled too (handled below).
+        let states = {
             let forge = self.forge().await?;
-            futures::future::try_join_all(candidates.iter().map(|(_, pr)| forge.is_merged(*pr)))
+            futures::future::try_join_all(candidates.iter().map(|(_, pr)| forge.pr_state(*pr)))
                 .await?
         };
-        let merged_names: Vec<String> = candidates
-            .iter()
-            .zip(merged_flags)
-            .filter(|(_, merged)| *merged)
-            .map(|((name, _), _)| name.clone())
-            .collect();
+        let names_with_state =
+            |want: PrState| -> Vec<String> {
+                candidates
+                    .iter()
+                    .zip(states.iter())
+                    .filter(|(_, s)| **s == want)
+                    .map(|((name, _), _)| name.clone())
+                    .collect()
+            };
+        let merged_names = names_with_state(PrState::Merged);
+        let closed_names = names_with_state(PrState::Closed);
         if merged_names.is_empty() {
             report.note("no merged PRs to reconcile");
         } else {
@@ -90,6 +97,35 @@ impl Engine {
                 }
             }
             self.state.branches.remove(name);
+        }
+
+        // 4b. Reconcile branches that are *done* but not via a clean merge: their PR was closed
+        // without merging, or their changes already appear in the advanced trunk (e.g. the whole
+        // stack landed as one separate squash PR — the exact case that used to wedge `sync`, since
+        // the leftover branches got rebased onto a trunk that already contained them). jjk can't
+        // *prove* these landed (unlike a merged PR), so — destructively — it asks first, defaulting
+        // to keep. Non-interactive runs (CI / no TTY) keep them and just note it.
+        let stale = self.detect_stale_branches(&closed_names, &merged_names).await?;
+        if !stale.is_empty() {
+            let listing = stale
+                .iter()
+                .map(|(name, why)| format!("  - {name} ({why})"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let prompt = format!(
+                "These stack branches look done but weren't cleanly merged:\n{listing}\n\
+                 Remove them from the local stack? Their commits will be abandoned and the stack \
+                 healed to trunk (the remote is untouched; recover with `jjk undo`)."
+            );
+            if self.prompter.confirm(&prompt, false)? {
+                let names: Vec<String> = stale.iter().map(|(n, _)| n.clone()).collect();
+                self.drop_stack_branches(&names, &mut report).await?;
+                report.note(color::yellow(&format!("dropped: {}", names.join(", "))));
+            } else {
+                report.note(
+                    "kept the local branches (run `jjk stack drop` to remove the whole stack)",
+                );
+            }
         }
 
         // 5. Recover the current workspace if a rewrite left it stale (cross-workspace: Phase 5).
@@ -181,5 +217,41 @@ impl Engine {
         self.state.save(&self.root)?;
         self.collect_conflicts(&mut report).await?;
         Ok(report)
+    }
+
+    /// Tracked branches that look landed-but-not-cleanly-merged after the rebase: a PR closed
+    /// without merging, or an empty contribution over its base (its tree equals its base's, i.e.
+    /// the changes are already in trunk). Excludes `merged` (handled separately) and the trunk.
+    /// Returned bottom→top as `(name, reason)`; the caller confirms before removing any.
+    async fn detect_stale_branches(
+        &self,
+        closed: &[String],
+        merged: &[String],
+    ) -> Result<Vec<(String, String)>> {
+        let stack = self.derive_stack().await?;
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (i, b) in stack.branches.iter().enumerate() {
+            if !b.tracked || merged.contains(&b.name) {
+                continue;
+            }
+            let reason = if closed.contains(&b.name) {
+                Some("PR closed without merging".to_string())
+            } else {
+                // Empty over its base ⇒ its changes already exist in trunk (landed elsewhere).
+                let base = if i == 0 {
+                    stack.trunk.clone()
+                } else {
+                    stack.branches[i - 1].tip.clone()
+                };
+                self.vcs
+                    .trees_equal(&b.tip, &base)
+                    .await?
+                    .then(|| "changes already in trunk".to_string())
+            };
+            if let Some(why) = reason {
+                out.push((b.name.clone(), why));
+            }
+        }
+        Ok(out)
     }
 }

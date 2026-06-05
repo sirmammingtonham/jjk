@@ -39,6 +39,13 @@ pub trait Prompter: Send + Sync {
     fn review_split(&self, _plan: &SplitPlan, _changed: &[String]) -> Result<SplitReview> {
         Ok(SplitReview::Accept)
     }
+
+    /// Confirm a yes/no decision (e.g. removing stack branches whose PRs were closed without
+    /// merging). The default returns `default` (used by [`AutoFill`], non-TTY, and CI), so
+    /// destructive callers pass `false` — nothing is removed unless a human answers yes.
+    fn confirm(&self, _prompt: &str, default: bool) -> Result<bool> {
+        Ok(default)
+    }
 }
 
 /// Non-interactive default: accept the derived defaults unchanged. Used by tests, in non-TTY / CI

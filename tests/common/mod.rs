@@ -174,6 +174,14 @@ impl FakeForge {
             p.state = PrState::Merged;
         }
     }
+
+    /// Mark a branch's PR closed-without-merging (for sync closed-PR reconcile tests).
+    pub fn set_closed(&self, branch: &str) {
+        let mut st = self.inner.lock().unwrap();
+        if let Some(p) = st.prs.iter_mut().find(|p| p.head == branch) {
+            p.state = PrState::Closed;
+        }
+    }
 }
 
 /// Newtype so a test can keep an inspectable `Arc<FakeForge>` while the engine owns a
@@ -200,6 +208,9 @@ impl Forge for SharedForge {
     }
     async fn is_merged(&self, pr: u64) -> Result<bool> {
         self.0.is_merged(pr).await
+    }
+    async fn pr_state(&self, pr: u64) -> Result<PrState> {
+        self.0.pr_state(pr).await
     }
     async fn view_pr(&self, pr: u64, web: bool) -> Result<Option<String>> {
         self.0.view_pr(pr, web).await
@@ -270,6 +281,16 @@ impl Forge for FakeForge {
             .find(|p| p.number == pr)
             .map(|p| p.state == PrState::Merged)
             .unwrap_or(false))
+    }
+
+    async fn pr_state(&self, pr: u64) -> Result<PrState> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .prs
+            .iter()
+            .find(|p| p.number == pr)
+            .map(|p| p.state)
+            .unwrap_or(PrState::Open))
     }
 
     async fn view_pr(&self, pr: u64, web: bool) -> Result<Option<String>> {

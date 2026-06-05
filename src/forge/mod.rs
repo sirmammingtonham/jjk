@@ -4,7 +4,7 @@
 pub mod gh_cli;
 
 use crate::error::Result;
-use crate::model::PrRef;
+use crate::model::{PrRef, PrState};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -24,6 +24,17 @@ pub trait Forge: Send + Sync {
     /// clobber edits. Today only the base branch is retargeted.
     async fn update_pr(&self, pr: u64, base: Option<&str>) -> Result<()>;
     async fn is_merged(&self, pr: u64) -> Result<bool>;
+
+    /// Current state of `pr` (open / merged / closed). The default derives from [`Self::is_merged`]
+    /// (so an adapter that only distinguishes merged keeps working); the real adapter reports
+    /// closed-without-merging too, which `sync` uses to offer dropping those branches locally.
+    async fn pr_state(&self, pr: u64) -> Result<PrState> {
+        Ok(if self.is_merged(pr).await? {
+            PrState::Merged
+        } else {
+            PrState::Open
+        })
+    }
 
     /// View a PR. With `web`, open it in the user's browser and return `None`; otherwise return its
     /// canonical URL (so callers can print it without launching a browser).

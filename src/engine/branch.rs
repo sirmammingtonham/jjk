@@ -1,6 +1,7 @@
 //! Branch + restacking verbs: create/checkout/onto/rename/squash/fold/split, nav, track.
 
 use super::*;
+use crate::color;
 
 impl Engine {
     /// `jjk branch create [NAME]` (tracked) / `jjk checkout -b NAME` (untracked).
@@ -188,6 +189,51 @@ impl Engine {
             "{} '{name}'",
             if tracked { "tracking" } else { "untracking" }
         ));
+        Ok(report)
+    }
+
+    /// `jjk stack drop` — remove the entire local stack: abandon every tracked branch's commits and
+    /// heal back to trunk. Intended for cleaning up after the stack's changes have already landed
+    /// (e.g. via a separate squashed PR), so the next `jjk sync` is clean. The remote is untouched;
+    /// `jjk undo` restores everything. Prompts for confirmation unless `assume_yes`.
+    pub async fn stack_drop(&mut self, assume_yes: bool) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report).await?;
+        let stack = self.derive_stack().await?;
+        let names: Vec<String> = stack
+            .branches
+            .iter()
+            .filter(|b| b.tracked)
+            .map(|b| b.name.clone())
+            .collect();
+        if names.is_empty() {
+            report.note("no tracked branches in the stack to drop");
+            return Ok(report);
+        }
+        if !assume_yes {
+            let prompt = format!(
+                "Drop the entire local stack ({})?\n\
+                 Their commits will be abandoned and the stack healed to trunk (the remote is \
+                 untouched; recover with `jjk undo`).",
+                names.join(", ")
+            );
+            if !self.prompter.confirm(&prompt, false)? {
+                report.note("aborted — nothing dropped");
+                return Ok(report);
+            }
+        }
+        self.drop_stack_branches(&names, &mut report).await?;
+        // Abandoning can move `@` (if it sat on a dropped commit); recover a stale workspace.
+        if self.vcs.is_stale().await.unwrap_or(false) {
+            self.vcs.update_stale().await?;
+            report.note("recovered stale working copy");
+        }
+        self.state.save(&self.root)?;
+        report.note(color::green(&format!(
+            "dropped {} {} from the local stack",
+            names.len(),
+            plural(names.len(), "branch", "branches")
+        )));
         Ok(report)
     }
 

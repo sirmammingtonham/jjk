@@ -4,8 +4,8 @@
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
 use jjk::cli::{
-    BranchCmd, Cli, Command, DomainCmd, DownstackCmd, PrCmd, RepoCmd, StashAction, SubmitArgs,
-    UpstackCmd, WorktreeCmd,
+    BranchCmd, Cli, Command, DomainCmd, DownstackCmd, PrCmd, RepoCmd, StackCmd, StashAction,
+    SubmitArgs, UpstackCmd, WorktreeCmd,
 };
 use jjk::engine::{Engine, NavDir, ResumeCmd, SubmitOptions, SubmitScope};
 use jjk::llm::SplitPlan;
@@ -277,6 +277,14 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
         Command::Untrack(arg) => {
             render::print_report(&engine.set_tracked(arg.name.as_deref(), false).await?);
         }
+        Command::Stack(StackCmd::Drop(args)) => {
+            // Destructive; confirm interactively unless `-y`. Install the terminal prompter so the
+            // confirmation reaches a TTY (non-TTY without `-y` aborts via the default `false`).
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                engine.set_prompter(Box::new(TerminalPrompter));
+            }
+            render::print_report(&engine.stack_drop(args.yes).await?);
+        }
         Command::Restack => {
             let report = engine.restack().await?;
             conflicts = !report.conflicts.is_empty();
@@ -402,6 +410,11 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             render::print_report(&report);
         }
         Command::Sync(args) => {
+            // sync may ask to drop branches whose PRs were closed without merging; install the
+            // terminal prompter so that confirmation is interactive (non-TTY keeps them).
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                engine.set_prompter(Box::new(TerminalPrompter));
+            }
             let report = engine.sync(/*push=*/ !args.no_push).await?;
             conflicts = !report.conflicts.is_empty();
             if conflicts {
@@ -539,6 +552,11 @@ impl Prompter for TerminalPrompter {
                 _ => eprintln!("please answer a, e, or b"),
             }
         }
+    }
+
+    fn confirm(&self, prompt: &str, default: bool) -> jjk::error::Result<bool> {
+        eprintln!("\n{prompt}");
+        prompt_yes_no("Proceed?", default)
     }
 }
 

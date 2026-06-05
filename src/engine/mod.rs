@@ -472,6 +472,49 @@ impl Engine {
         })
     }
 
+    /// Remove `names` from the local stack: abandon each present branch's commit range (jj
+    /// re-parents the upstack onto the parent, so the gap heals) or, if a branch's commit was
+    /// already absorbed into trunk, just delete its now-redundant bookmark. Drops the `BranchEntry`
+    /// too. The remote is **untouched** — this is a local cleanup; `jjk undo` restores it.
+    ///
+    /// Shared by `sync`'s closed/landed reconcile and `jjk stack drop`. No-op on an empty list.
+    pub(in crate::engine) async fn drop_stack_branches(
+        &mut self,
+        names: &[String],
+        report: &mut Report,
+    ) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let stack = self.derive_stack().await?;
+        let mut ranges: Vec<ChangeId> = Vec::new();
+        let mut orphan_bookmarks: Vec<String> = Vec::new();
+        for name in names {
+            match stack.branch(name) {
+                Some(b) => ranges.extend(b.commits.iter().map(|c| c.change_id.clone())),
+                // Already in trunk's ancestry (e.g. merge-commit landing) — nothing to abandon.
+                None => orphan_bookmarks.push(name.clone()),
+            }
+        }
+        if !ranges.is_empty() {
+            self.vcs.transaction(&mut |tx| tx.abandon(&ranges))?;
+        }
+        if !orphan_bookmarks.is_empty() {
+            let existing = self.vcs.bookmarks().await?;
+            for n in &orphan_bookmarks {
+                if existing.iter().any(|bm| bm.name == *n) {
+                    let n = n.clone();
+                    self.vcs.transaction(&mut |tx| tx.delete_bookmark(&n))?;
+                }
+            }
+        }
+        for name in names {
+            self.state.branches.remove(name);
+            report.note(format!("dropped '{name}'"));
+        }
+        Ok(())
+    }
+
     // ---------------------------------------------------------------- git interop
 
     /// Follow an external `git checkout`. jjk's fast reads use `--ignore-working-copy`, which skips

@@ -35,6 +35,10 @@ pub enum Command {
     /// Convert a branch to untracked (defaults to the current branch).
     Untrack(OptNameArg),
 
+    /// Whole-stack operations.
+    #[command(subcommand)]
+    Stack(StackCmd),
+
     /// Working-copy status with stack position.
     Status,
     /// Stack diagram (branches only).
@@ -233,6 +237,21 @@ pub struct SubmitArgs {
     /// Domain expansion: accept the proposed split without the interactive review gate.
     #[arg(long = "no-review", short = 'y')]
     pub no_review: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StackCmd {
+    /// Drop the entire local stack: abandon every tracked branch's commits and heal to trunk.
+    /// Use after the stack's changes landed via another PR; the remote is untouched and `jjk undo`
+    /// restores everything.
+    Drop(StackDropArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct StackDropArgs {
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long = "yes")]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug)]
