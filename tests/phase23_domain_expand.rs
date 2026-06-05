@@ -9,8 +9,38 @@ use jjk::engine::{Engine, SubmitScope};
 use jjk::llm::{FakeSplitter, LayerSpec, SplitPlan};
 use jjk::model::ChangeId;
 use jjk::prompt::{PrDraft, Prompter, SplitReview};
+use jjk::vcs::PushOpts;
+use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
+
+fn git(dir: &Path, args: &[&str]) {
+    assert!(
+        Command::new("git").current_dir(dir).args(args).status().unwrap().success(),
+        "git {args:?} failed"
+    );
+}
+
+/// A splitter that puts every atom of whatever it's given into a single layer (adapts to the input,
+/// so it works per-bucket in the hierarchical path — unlike a fixed scripted plan).
+struct OneLayerSplitter;
+#[async_trait::async_trait]
+impl jjk::llm::Splitter for OneLayerSplitter {
+    async fn split(&self, input: &jjk::llm::SplitInput) -> jjk::error::Result<SplitPlan> {
+        Ok(SplitPlan {
+            layers: vec![LayerSpec {
+                slug: "all".into(),
+                atoms: input.atoms.iter().map(|a| a.label.clone()).collect(),
+                title: "All".into(),
+                body: String::new(),
+                rationale: String::new(),
+                backward_compatible: true,
+                compat_notes: String::new(),
+            }],
+        })
+    }
+}
 
 /// A prompter that yields one scripted split-review verdict, then accepts.
 struct ScriptedPrompter(Mutex<Option<SplitReview>>);
@@ -363,28 +393,122 @@ async fn domain_sync_keeps_the_stack_stable() {
 }
 
 #[tokio::test]
-async fn verify_command_runs_and_reports() {
+async fn domain_sync_surfaces_monolith_rebase_conflicts() {
+    let mut h = setup_with_remote().await;
+    let root = h.repo.path().to_path_buf();
+
+    // Seed + push trunk with a shared file.
+    write(&root, "shared.rs", "base\n");
+    h.engine
+        .vcs()
+        .transaction(&mut |tx| {
+            let id = tx.finalize_working_copy("chore: seed trunk")?;
+            tx.create_bookmark("main", &id)?;
+            Ok(())
+        })
+        .unwrap();
+    h.engine.vcs().push("origin", "main", PushOpts::default()).await.unwrap();
+
+    // Monolith edits the shared file.
+    h.engine.branch_create("feature", true).await.unwrap();
+    write(&root, "shared.rs", "feature change\n");
+    h.engine.commit("feature: edit shared").await.unwrap();
+    h.engine
+        .domain_activate(Mode::Change, None, None)
+        .await
+        .unwrap();
+    h.engine.set_splitter(Box::new(FakeSplitter::deterministic()));
+    let fake = Arc::new(FakeForge::new());
+    h.engine.set_forge(Box::new(SharedForge(fake.clone())));
+
+    // Someone else lands a CONFLICTING edit to the same file on trunk.
+    let work = tempfile::tempdir().unwrap();
+    let bare = h.remote.path().join("origin.git");
+    git(work.path(), &["clone", bare.to_str().unwrap(), "."]);
+    git(work.path(), &["config", "user.email", "x@e.com"]);
+    git(work.path(), &["config", "user.name", "x"]);
+    std::fs::write(work.path().join("shared.rs"), "other change\n").unwrap();
+    git(work.path(), &["add", "shared.rs"]);
+    git(work.path(), &["commit", "-m", "trunk: conflicting edit"]);
+    git(work.path(), &["push", "origin", "main"]);
+
+    // Sync rebases the monolith onto the new trunk → conflict → surfaced, not silently expanded.
+    let report = h.engine.sync(/*push=*/ true).await.unwrap();
+    assert!(
+        !report.conflicts.is_empty(),
+        "rebase conflict should surface; notes: {:?}",
+        report.notes
+    );
+    assert_eq!(fake.count(), 0, "no PRs created from a conflicted monolith");
+}
+
+#[tokio::test]
+async fn hierarchical_split_for_large_changesets() {
+    let (tmp, mut e) = setup().await;
+    let root = tmp.path().to_path_buf();
+    e.branch_create("feature", true).await.unwrap();
+    // 70 independent files → 70 atoms, over the 60-atom threshold → two buckets.
+    for i in 0..70 {
+        write(&root, &format!("f{i}.rs"), &format!("fn f{i}() {{}}\n"));
+    }
+    e.commit("feature: big change").await.unwrap();
+    e.domain_activate(Mode::Change, None, None).await.unwrap();
+    e.set_splitter(Box::new(OneLayerSplitter));
+
+    e.domain_expand(/*preview=*/ false).await.unwrap();
+
+    let st = ExpansionState::load(&root).unwrap().unwrap();
+    assert_eq!(st.layers.len(), 2, "two buckets → two layers (one per bucket)");
+    assert!(st.layers[0].slug.starts_with("b0-"));
+    assert!(st.layers[1].slug.starts_with("b1-"));
+
+    // Hierarchical reconstruction still satisfies the equivalence invariant.
+    let monolith_tip = resolve_tip(&e, "feature").await;
+    let top = resolve_tip(&e, &format!("jjk/layer/{}", st.layers.last().unwrap().slug)).await;
+    assert!(
+        e.vcs().trees_equal(&top, &monolith_tip).await.unwrap(),
+        "hierarchical stack top must equal the monolith"
+    );
+}
+
+#[tokio::test]
+async fn verify_passing_keeps_all_layers() {
     let (tmp, mut e) = setup().await;
     let root = tmp.path().to_path_buf();
     monolith(&mut e, &root).await;
-    // `true` passes for every layer.
-    e.domain_activate(Mode::Change, None, Some("true".into()))
+    e.domain_activate(Mode::Change, None, Some("true".into())) // `true` passes for every layer
         .await
         .unwrap();
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
     })));
-    let pass = e.domain_expand(false).await.unwrap().notes.join("\n");
-    assert!(pass.contains("verified all layers"), "got:\n{pass}");
+    let report = e.domain_expand(false).await.unwrap().notes.join("\n");
+    assert!(report.contains("verified all layers"), "got:\n{report}");
+    let st = ExpansionState::load(&root).unwrap().unwrap();
+    assert_eq!(st.layers.len(), 2, "both layers kept when each builds");
+}
 
-    // `false` fails for every layer → surfaced as a warning.
-    e.domain_activate(Mode::Change, None, Some("false".into()))
+#[tokio::test]
+async fn verify_failure_folds_layers_forward() {
+    let (tmp, mut e) = setup().await;
+    let root = tmp.path().to_path_buf();
+    monolith(&mut e, &root).await;
+    e.domain_activate(Mode::Change, None, Some("false".into())) // `false` fails every layer
         .await
         .unwrap();
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
     })));
-    let fail = e.domain_expand(false).await.unwrap().notes.join("\n");
-    assert!(fail.contains("verify"), "got:\n{fail}");
-    assert!(fail.contains("failed"), "got:\n{fail}");
+    let report = e.domain_expand(false).await.unwrap().notes.join("\n");
+    assert!(report.contains("merging into the next layer"), "got:\n{report}");
+
+    // The failing bottom layer is folded into the last → a single sealed layer covering everything.
+    let st = ExpansionState::load(&root).unwrap().unwrap();
+    assert_eq!(st.layers.len(), 1, "all layers folded forward into one");
+    assert_eq!(st.layers[0].slug, "base", "keeps the first layer's identity");
+
+    // Equivalence still holds: the single layer reproduces the monolith.
+    let monolith_tip = resolve_tip(&e, "feature").await;
+    let top = resolve_tip(&e, &format!("jjk/layer/{}", st.layers[0].slug)).await;
+    assert!(e.vcs().trees_equal(&top, &monolith_tip).await.unwrap());
 }

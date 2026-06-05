@@ -675,6 +675,106 @@ pub fn match_layers(plan: &mut SplitPlan, existing: &[PersistedLayer], atoms: &[
     }
 }
 
+// ---- hierarchical split (huge diffs) -----------------------------------------------------------
+
+/// Connected components of the atoms under the dependency/affinity edges (union-find). Each is a
+/// list of atom indices; components are ordered by first appearance. Hard-connected atoms stay
+/// together, so splitting these across buckets never separates a co-dependent group.
+pub fn components(n: usize, edges: &[Edge]) -> Vec<Vec<usize>> {
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(p: &mut [usize], x: usize) -> usize {
+        let mut r = x;
+        while p[r] != r {
+            r = p[r];
+        }
+        let mut c = x;
+        while p[c] != r {
+            let nx = p[c];
+            p[c] = r;
+            c = nx;
+        }
+        r
+    }
+    for e in edges {
+        if e.from < n && e.to < n {
+            let (a, b) = (find(&mut parent, e.from), find(&mut parent, e.to));
+            if a != b {
+                parent[a] = b;
+            }
+        }
+    }
+    let mut order = Vec::new();
+    let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for i in 0..n {
+        let r = find(&mut parent, i);
+        if !groups.contains_key(&r) {
+            order.push(r);
+        }
+        groups.entry(r).or_default().push(i);
+    }
+    order
+        .into_iter()
+        .map(|r| {
+            let mut v = groups.remove(&r).unwrap();
+            v.sort_unstable();
+            v
+        })
+        .collect()
+}
+
+/// Pack whole components into buckets of at most `max` atoms (a component larger than `max` becomes
+/// its own bucket). Used to bound each LLM call's catalog for very large changesets.
+pub fn bucket_components(n: usize, edges: &[Edge], max: usize) -> Vec<Vec<usize>> {
+    let mut buckets: Vec<Vec<usize>> = Vec::new();
+    let mut cur: Vec<usize> = Vec::new();
+    for comp in components(n, edges) {
+        if !cur.is_empty() && cur.len() + comp.len() > max {
+            buckets.push(std::mem::take(&mut cur));
+        }
+        cur.extend(comp);
+        if cur.len() >= max {
+            buckets.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        buckets.push(cur);
+    }
+    buckets
+}
+
+/// The subset of `edges` internal to `bucket`, remapped to the bucket's local atom indices.
+pub fn sub_edges(edges: &[Edge], bucket: &[usize]) -> Vec<Edge> {
+    let local: std::collections::HashMap<usize, usize> =
+        bucket.iter().enumerate().map(|(l, &g)| (g, l)).collect();
+    edges
+        .iter()
+        .filter_map(|e| match (local.get(&e.from), local.get(&e.to)) {
+            (Some(&f), Some(&t)) => Some(Edge {
+                from: f,
+                to: t,
+                kind: e.kind,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Rewrite a per-bucket sub-plan's labels from bucket-local back to global atom labels, and prefix
+/// each slug with the bucket index to keep slugs unique across buckets (incremental `match_layers`
+/// re-attaches stable identity afterward, so the prefix doesn't churn PRs).
+pub fn remap_and_prefix(plan: &mut SplitPlan, bucket: &[usize], bucket_idx: usize) {
+    for layer in &mut plan.layers {
+        layer.atoms = layer
+            .atoms
+            .iter()
+            .filter_map(|l| label_index(l))
+            .filter_map(|li| bucket.get(li))
+            .map(|&g| atom_label(g))
+            .collect();
+        layer.slug = format!("b{bucket_idx}-{}", layer.slug);
+    }
+}
+
 /// Slugs of plan layers that differ from the previous expansion (new layer, or same slug but a
 /// changed atom set) — used to highlight what moved in a re-split's review.
 pub fn changed_layers(plan: &SplitPlan, existing: &[PersistedLayer], atoms: &[Atom]) -> Vec<String> {
@@ -747,6 +847,40 @@ mod resolve_tests {
         assert_eq!(plan.layers.len(), 2);
         assert_eq!(plan.layers[1].slug, "remainder");
         assert_eq!(plan.layers[1].atoms, vec!["a1", "a3"]);
+    }
+
+    #[test]
+    fn buckets_pack_components_and_labels_remap() {
+        // 5 atoms; edges link {0,1} and {2,3}; 4 is alone → 3 components.
+        let edges = vec![
+            Edge {
+                from: 0,
+                to: 1,
+                kind: EdgeKind::SameFile,
+            },
+            Edge {
+                from: 2,
+                to: 3,
+                kind: EdgeKind::SameFile,
+            },
+        ];
+        assert_eq!(components(5, &edges).len(), 3);
+
+        let buckets = bucket_components(5, &edges, 2);
+        assert_eq!(buckets, vec![vec![0, 1], vec![2, 3], vec![4]]);
+
+        // Edges internal to bucket {2,3} remap to local indices (0,1); the {0,1} edge is dropped.
+        let se = sub_edges(&edges, &buckets[1]);
+        assert_eq!(se.len(), 1);
+        assert_eq!((se[0].from, se[0].to), (0, 1));
+
+        // A bucket-local plan remaps back to global labels and gets a bucket-prefixed slug.
+        let mut plan = SplitPlan {
+            layers: vec![layer("x", &["a0", "a1"])],
+        };
+        remap_and_prefix(&mut plan, &buckets[1], 1);
+        assert_eq!(plan.layers[0].atoms, vec!["a2", "a3"]);
+        assert_eq!(plan.layers[0].slug, "b1-x");
     }
 
     #[test]

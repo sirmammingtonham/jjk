@@ -24,6 +24,11 @@ const STACK_BOOKMARKS: &str = r#"(bookmarks() ~ bookmarks(glob:"jjk/stash/*"))"#
 /// How many undo checkpoints to retain (one per mutating jjk command).
 const MAX_CHECKPOINTS: usize = 100;
 
+/// Above this many change-atoms, domain expansion splits hierarchically (bucket the atoms into
+/// dependency-component groups and split each separately) so no single LLM call carries the whole
+/// catalog. Sized to keep a single split prompt comfortably small.
+const HIERARCHICAL_THRESHOLD: usize = 60;
+
 /// A single undo point: the jj operation to restore to, plus a snapshot of jjk's state.toml so the
 /// two stay in sync. Stored as a stack in `.jj/jjk/undo.json`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -2176,15 +2181,22 @@ impl Engine {
             .map(|c| c.subject().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        let input = expansion::build_split_input(
-            st.mode,
-            st.instruction.clone(),
-            &atoms,
-            &edges,
-            &files,
-            commit_subjects,
-        );
-        let mut plan = self.splitter().split(&input).await?;
+        // For very large changesets, split hierarchically so no single LLM call carries the whole
+        // catalog; otherwise one call. Either way the LLM draws the boundaries.
+        let mut plan = if atoms.len() > HIERARCHICAL_THRESHOLD {
+            self.hierarchical_split(st, &atoms, &edges, &files, &commit_subjects)
+                .await?
+        } else {
+            let input = expansion::build_split_input(
+                st.mode,
+                st.instruction.clone(),
+                &atoms,
+                &edges,
+                &files,
+                commit_subjects,
+            );
+            self.splitter().split(&input).await?
+        };
         expansion::repair_completeness(&mut plan, atoms.len());
         Ok(expansion::ResolvedSplit {
             atoms,
@@ -2193,6 +2205,43 @@ impl Engine {
             monolith_tip,
             plan,
         })
+    }
+
+    /// Split a large changeset in two tiers: bucket the atoms into ≤[`HIERARCHICAL_THRESHOLD`]-sized
+    /// groups of whole dependency components, run the splitter on each bucket independently (bounded
+    /// catalog → cheaper, cacheable calls), and concatenate the results. The LLM still decides the
+    /// boundaries within each bucket.
+    async fn hierarchical_split(
+        &self,
+        st: &ExpansionState,
+        atoms: &[expansion::Atom],
+        edges: &[expansion::Edge],
+        files: &[crate::model::FileDiff],
+        commit_subjects: &[String],
+    ) -> Result<crate::llm::SplitPlan> {
+        let buckets = expansion::bucket_components(atoms.len(), edges, HIERARCHICAL_THRESHOLD);
+        eprintln!(
+            "domain expansion: large changeset ({} atoms) — splitting in {} group(s)",
+            atoms.len(),
+            buckets.len()
+        );
+        let mut layers = Vec::new();
+        for (bi, bucket) in buckets.iter().enumerate() {
+            let sub_atoms: Vec<expansion::Atom> = bucket.iter().map(|&i| atoms[i].clone()).collect();
+            let sub_edges = expansion::sub_edges(edges, bucket);
+            let input = expansion::build_split_input(
+                st.mode,
+                st.instruction.clone(),
+                &sub_atoms,
+                &sub_edges,
+                files,
+                commit_subjects.to_vec(),
+            );
+            let mut sub = self.splitter().split(&input).await?;
+            expansion::remap_and_prefix(&mut sub, bucket, bi);
+            layers.extend(sub.layers);
+        }
+        Ok(crate::llm::SplitPlan { layers })
     }
 
     /// Scratch jj workspace path for reconstruction (outside the repo so it can't nest).
@@ -2265,14 +2314,21 @@ impl Engine {
             }
         }
 
-        // 2. Build each layer bottom→top, accumulating included hunks per file.
+        // 2. Build each layer bottom→top. `included` accumulates hunks cumulatively. With --verify,
+        //    a non-last layer that can't build on its own is **folded forward** into the next layer
+        //    (one combined commit/bookmark/PR) — the only structural change to the LLM's plan.
+        let verify_cmd = st.verify_cmd.clone();
         let mut parent = resolved.trunk.clone();
         let mut included: HashMap<usize, Vec<usize>> = HashMap::new();
         let mut new_layers: Vec<PersistedLayer> = Vec::new();
-        let mut layer_ids: Vec<ChangeId> = Vec::new();
+        // (slug, title, body, atom_hashes, folded_count) accumulated but not yet sealed.
+        let mut pending: Option<(String, String, String, Vec<String>, usize)> = None;
+        let mut verify_failures: Vec<String> = Vec::new();
+        let n_layers = resolved.plan.layers.len();
 
-        for layer in &resolved.plan.layers {
-            let mut atom_hashes = Vec::new();
+        for (li, layer) in resolved.plan.layers.iter().enumerate() {
+            // Accumulate this layer's atoms into the cumulative file map and the pending group.
+            let mut these_hashes = Vec::new();
             for label in &layer.atoms {
                 let Some(ai) = expansion::label_index(label) else {
                     continue;
@@ -2280,7 +2336,7 @@ impl Engine {
                 let Some(atom) = resolved.atoms.get(ai) else {
                     continue;
                 };
-                atom_hashes.push(atom.id.clone());
+                these_hashes.push(atom.id.clone());
                 let acc = included.entry(atom.file_idx).or_default();
                 for &h in &atom.hunks {
                     if !acc.contains(&h) {
@@ -2288,66 +2344,89 @@ impl Engine {
                     }
                 }
             }
+            match &mut pending {
+                None => {
+                    pending = Some((
+                        layer.slug.clone(),
+                        layer.title.clone(),
+                        layer.body.clone(),
+                        these_hashes,
+                        0,
+                    ))
+                }
+                Some((_, _, _, hashes, folded)) => {
+                    hashes.extend(these_hashes);
+                    *folded += 1;
+                }
+            }
 
-            // New empty commit on the previous layer (or trunk), made `@` in the scratch workspace.
+            // Candidate commit on `parent` with the cumulative content, snapshotted into `id`.
             let mut new_id: Option<ChangeId> = None;
             scratch.transaction(&mut |tx| {
                 new_id = Some(tx.new_child(&parent)?);
                 Ok(())
             })?;
             let id = new_id.expect("new_child returns an id");
+            materialize_layer(scratch_dir, &resolved.files, &base, &included)?;
+            scratch.snapshot().await?;
 
-            // Materialize cumulative content for every touched file.
-            for (&fi, hidxs) in &included {
-                let f = &resolved.files[fi];
-                let base_content = match f.change {
-                    FileChangeKind::Added => None,
-                    FileChangeKind::Renamed => f.old_path.as_deref().and_then(|p| base.get(p)),
-                    _ => base.get(&f.path),
-                };
-                match expansion::materialize_file(base_content.map(String::as_str), f, hidxs)? {
-                    Materialized::Write(content) => {
-                        let abs = scratch_dir.join(&f.path);
-                        if let Some(dir) = abs.parent() {
-                            fs::create_dir_all(dir)?;
-                        }
-                        fs::write(&abs, content)?;
-                        if f.change == FileChangeKind::Renamed {
-                            if let Some(old) = &f.old_path {
-                                let _ = fs::remove_file(scratch_dir.join(old));
-                            }
-                        }
-                    }
-                    Materialized::Delete => {
-                        let _ = fs::remove_file(scratch_dir.join(&f.path));
-                    }
-                    Materialized::Skip => {} // binary — remainder handles it
+            // Verify (if configured) while this tree is `@`; fold non-last failures forward.
+            let last = li + 1 == n_layers;
+            let passed = match &verify_cmd {
+                Some(cmd) => run_verify_cmd(scratch_dir, cmd),
+                None => true,
+            };
+            if !passed {
+                if let Some((slug, ..)) = &pending {
+                    verify_failures.push(slug.clone());
                 }
             }
-
-            scratch.snapshot().await?; // capture the working copy into `id`
-            let bookmark = ExpansionState::layer_bookmark(&layer.slug);
-            let msg = if layer.body.trim().is_empty() {
-                layer.title.clone()
+            if passed || last {
+                let (slug, title, body, hashes, folded) = pending.take().expect("pending set above");
+                let title = if folded > 0 {
+                    format!("{title} (+{folded} merged to build)")
+                } else {
+                    title
+                };
+                let bookmark = ExpansionState::layer_bookmark(&slug);
+                let msg = if body.trim().is_empty() {
+                    title.clone()
+                } else {
+                    format!("{title}\n\n{body}")
+                };
+                let bm = bookmark.clone();
+                scratch.transaction(&mut |tx| {
+                    tx.describe(&id, &msg)?;
+                    tx.set_bookmark(&bm, &id)?;
+                    Ok(())
+                })?;
+                self.state.branch_mut(&bookmark).tracked = true;
+                new_layers.push(PersistedLayer {
+                    slug,
+                    bookmark,
+                    atom_hashes: hashes,
+                    title,
+                    body,
+                });
+                parent = id;
             } else {
-                format!("{}\n\n{}", layer.title, layer.body)
-            };
-            let bm = bookmark.clone();
-            scratch.transaction(&mut |tx| {
-                tx.describe(&id, &msg)?;
-                tx.set_bookmark(&bm, &id)?;
-                Ok(())
-            })?;
-            self.state.branch_mut(&bookmark).tracked = true;
-            new_layers.push(PersistedLayer {
-                slug: layer.slug.clone(),
-                bookmark,
-                atom_hashes,
-                title: layer.title.clone(),
-                body: layer.body.clone(),
-            });
-            layer_ids.push(id.clone());
-            parent = id;
+                // Folded forward: leave `parent`; the next iteration rebuilds on it with the combined
+                // atoms. The orphan candidate commit is discarded with the scratch workspace.
+                report.note(format!(
+                    "layer '{}' didn't build alone — merging into the next layer",
+                    layer.slug
+                ));
+            }
+        }
+        if let Some(cmd) = &verify_cmd {
+            if verify_failures.is_empty() {
+                report.note(format!("verified all layers with `{cmd}`"));
+            } else {
+                report.note(format!(
+                    "⚠ verify (`{cmd}`) failed for {} layer(s); folded forward where possible",
+                    verify_failures.len()
+                ));
+            }
         }
 
         // 3. Equivalence gate: if the reconstructed top doesn't match the monolith (binary files, a
@@ -2376,7 +2455,6 @@ impl Engine {
                 title: "Remaining changes".into(),
                 body: "Residual changes not captured by earlier layers.".into(),
             });
-            layer_ids.push(id.clone());
             parent = id;
             report.note("added a remainder layer to preserve all changes");
         }
@@ -2387,36 +2465,6 @@ impl Engine {
                 "reconstruction did not match the monolith — aborting so no changes are lost".into(),
             )
             .into());
-        }
-
-        // 4b. Opt-in hard backward-compat gate: check out each layer in the scratch workspace and
-        //     run the verify command. Failures are surfaced (a layer that can't build alone breaks
-        //     trunk if merged first); the user can refine the split via --mode/--instruction.
-        if let Some(cmd) = st.verify_cmd.clone() {
-            let mut failures = Vec::new();
-            for (i, id) in layer_ids.iter().enumerate() {
-                scratch.transaction(&mut |tx| tx.edit(id))?;
-                scratch.snapshot().await?; // materialize this layer's tree in the scratch wc
-                let ok = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd)
-                    .current_dir(scratch_dir)
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if !ok {
-                    failures.push(new_layers[i].slug.clone());
-                }
-            }
-            if failures.is_empty() {
-                report.note(format!("verified all layers with `{cmd}`"));
-            } else {
-                report.note(format!(
-                    "⚠ verify (`{cmd}`) failed for: {} — these layers may not be self-contained; \
-                     refine with --instruction/--mode or merge them",
-                    failures.join(", ")
-                ));
-            }
         }
 
         // 5. Forget layer bookmarks from a previous expansion that no longer exist.
@@ -2472,15 +2520,24 @@ impl Engine {
         };
         self.ensure_fresh(report).await?;
 
-        // Fast path: if the monolith hasn't moved since the last expansion and all layer bookmarks
-        // still exist, reuse the existing stack — no re-split, no commit/PR churn on idempotent runs.
-        let monolith_commit = self
+        // Refuse to expand a conflicted monolith — reconstructing from it would build broken layers.
+        let monolith_info = self
             .vcs
             .resolve(&format!("bookmarks(exact:{:?})", st.monolith))
             .await?
             .into_iter()
-            .next()
-            .map(|c| c.commit_id.0);
+            .next();
+        if monolith_info.as_ref().is_some_and(|c| c.has_conflict) {
+            return Err(JjkError::Msg(format!(
+                "'{}' has unresolved conflicts — run `jjk resolve` before expanding/submitting",
+                st.monolith
+            ))
+            .into());
+        }
+
+        // Fast path: if the monolith hasn't moved since the last expansion and all layer bookmarks
+        // still exist, reuse the existing stack — no re-split, no commit/PR churn on idempotent runs.
+        let monolith_commit = monolith_info.map(|c| c.commit_id.0);
         if monolith_commit.is_some()
             && st.monolith_commit == monolith_commit
             && !st.layers.is_empty()
@@ -2653,9 +2710,18 @@ impl Engine {
 
         self.rebase_branch_onto_trunk(&st0.monolith, &mut report).await?;
 
+        // If the rebase onto the new trunk conflicted, surface it and stop *before* re-expanding —
+        // building layers from a conflicted monolith would be wrong. main opens a resolve session
+        // (ResumeCmd::Sync) so `jjk resolve` walks the conflict and re-runs this sync when clean.
+        self.collect_conflicts(&mut report).await?;
+        if !report.conflicts.is_empty() {
+            report.note("monolith conflicts after rebasing onto trunk — run `jjk resolve`, then sync resumes");
+            return Ok(report);
+        }
+
         if push {
             // Re-expand and (re)submit the resulting stack in one idempotent pass.
-            return self
+            let sub = self
                 .submit_with(
                     SubmitScope::Stack,
                     SubmitOptions {
@@ -2663,7 +2729,10 @@ impl Engine {
                         no_review: true,
                     },
                 )
-                .await;
+                .await?;
+            report.notes.extend(sub.notes);
+            report.conflicts.extend(sub.conflicts);
+            return Ok(report);
         }
         // Local-only: regenerate the layer stack without touching the remote.
         self.maybe_expand_monolith(true, &mut report).await?;
@@ -2736,6 +2805,56 @@ fn render_split_plan(r: &expansion::ResolvedSplit, report: &mut Report) {
             report.note(format!("       compat: {}", layer.compat_notes));
         }
     }
+}
+
+/// Write the cumulative content of every touched file (per `included` hunk indices) into the scratch
+/// working copy, applying the patch subset onto each file's trunk `base`. Deletions remove the file;
+/// binary files are skipped (the remainder commit captures them).
+fn materialize_layer(
+    scratch_dir: &Path,
+    files: &[crate::model::FileDiff],
+    base: &std::collections::HashMap<String, String>,
+    included: &std::collections::HashMap<usize, Vec<usize>>,
+) -> Result<()> {
+    use std::fs;
+    for (&fi, hidxs) in included {
+        let f = &files[fi];
+        let base_content = match f.change {
+            FileChangeKind::Added => None,
+            FileChangeKind::Renamed => f.old_path.as_deref().and_then(|p| base.get(p)),
+            _ => base.get(&f.path),
+        };
+        match expansion::materialize_file(base_content.map(String::as_str), f, hidxs)? {
+            Materialized::Write(content) => {
+                let abs = scratch_dir.join(&f.path);
+                if let Some(dir) = abs.parent() {
+                    fs::create_dir_all(dir)?;
+                }
+                fs::write(&abs, content)?;
+                if f.change == FileChangeKind::Renamed {
+                    if let Some(old) = &f.old_path {
+                        let _ = fs::remove_file(scratch_dir.join(old));
+                    }
+                }
+            }
+            Materialized::Delete => {
+                let _ = fs::remove_file(scratch_dir.join(&f.path));
+            }
+            Materialized::Skip => {}
+        }
+    }
+    Ok(())
+}
+
+/// Run a verify command (`sh -c <cmd>`) in `dir`; `true` on exit 0. A spawn failure counts as fail.
+fn run_verify_cmd(dir: &Path, cmd: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Whether the remote already has `branch` at its current tip commit — i.e. a push would be a
