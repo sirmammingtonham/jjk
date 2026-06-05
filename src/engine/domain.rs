@@ -12,6 +12,20 @@ use std::path::{Path, PathBuf};
 
 use super::{Engine, Report, SubmitOptions, SubmitScope};
 
+/// A layer (or several folded together by `--verify`) accumulated during reconstruction but not yet
+/// sealed into a commit/bookmark. Identified by the first layer's metadata; `folded` counts how many
+/// later layers were merged in to make the slice build.
+struct Pending {
+    slug: String,
+    title: String,
+    body: String,
+    rationale: String,
+    backward_compatible: bool,
+    compat_notes: String,
+    hashes: Vec<String>,
+    folded: usize,
+}
+
 // ---------------------------------------------------------------- domain expansion (experimental)
 
 impl Engine {
@@ -23,6 +37,8 @@ impl Engine {
         mode: Mode,
         instruction: Option<String>,
         verify: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
     ) -> Result<Report> {
         let mut report = Report::default();
         let branch = self.current_branch().await?.ok_or(JjkError::NotOnBranch)?;
@@ -32,8 +48,21 @@ impl Engine {
         st.mode = mode;
         st.instruction = instruction;
         st.verify_cmd = verify;
+        // Only overwrite the model/effort overrides when explicitly given (preserve on re-activate).
+        if model.is_some() {
+            st.model = model;
+        }
+        if effort.is_some() {
+            st.thinking = effort;
+        }
         st.save(&self.root)?;
         report.note(format!("domain expansion active on '{branch}' (mode: {mode})"));
+        if let Some(m) = &st.model {
+            report.note(format!("model: {m}"));
+        }
+        if let Some(t) = &st.thinking {
+            report.note(format!("effort: {t}"));
+        }
         report.note("run `jjk submit` to split it into a reviewable stack");
         Ok(report)
     }
@@ -62,7 +91,11 @@ impl Engine {
                     .pr_of(&l.bookmark)
                     .map(|n| format!(" → #{n}"))
                     .unwrap_or_default();
-                report.note(format!("  {}. {} [{}]{}", i + 1, l.title, l.slug, pr));
+                let warn = if l.backward_compatible { "" } else { " ⚠" };
+                report.note(format!("  {}. {} [{}]{pr}{warn}", i + 1, l.title, l.slug));
+                if !l.backward_compatible && !l.compat_notes.is_empty() {
+                    report.note(format!("       ⚠ {}", l.compat_notes));
+                }
             }
         }
         Ok(report)
@@ -235,8 +268,8 @@ impl Engine {
         let mut parent = resolved.trunk.clone();
         let mut included: HashMap<usize, Vec<usize>> = HashMap::new();
         let mut new_layers: Vec<PersistedLayer> = Vec::new();
-        // (slug, title, body, atom_hashes, folded_count) accumulated but not yet sealed.
-        let mut pending: Option<(String, String, String, Vec<String>, usize)> = None;
+        // A layer (or several folded together by --verify) accumulated but not yet sealed.
+        let mut pending: Option<Pending> = None;
         let mut verify_failures: Vec<String> = Vec::new();
         let n_layers = resolved.plan.layers.len();
 
@@ -260,17 +293,20 @@ impl Engine {
             }
             match &mut pending {
                 None => {
-                    pending = Some((
-                        layer.slug.clone(),
-                        layer.title.clone(),
-                        layer.body.clone(),
-                        these_hashes,
-                        0,
-                    ))
+                    pending = Some(Pending {
+                        slug: layer.slug.clone(),
+                        title: layer.title.clone(),
+                        body: layer.body.clone(),
+                        rationale: layer.rationale.clone(),
+                        backward_compatible: layer.backward_compatible,
+                        compat_notes: layer.compat_notes.clone(),
+                        hashes: these_hashes,
+                        folded: 0,
+                    })
                 }
-                Some((_, _, _, hashes, folded)) => {
-                    hashes.extend(these_hashes);
-                    *folded += 1;
+                Some(p) => {
+                    p.hashes.extend(these_hashes);
+                    p.folded += 1;
                 }
             }
 
@@ -291,22 +327,39 @@ impl Engine {
                 None => true,
             };
             if !passed {
-                if let Some((slug, ..)) = &pending {
-                    verify_failures.push(slug.clone());
+                if let Some(p) = &pending {
+                    verify_failures.push(p.slug.clone());
                 }
             }
             if passed || last {
-                let (slug, title, body, hashes, folded) = pending.take().expect("pending set above");
-                let title = if folded > 0 {
-                    format!("{title} (+{folded} merged to build)")
+                let p = pending.take().expect("pending set above");
+                let title = if p.folded > 0 {
+                    format!("{} (+{} merged to build)", p.title, p.folded)
                 } else {
-                    title
+                    p.title.clone()
                 };
-                let bookmark = ExpansionState::layer_bookmark(&slug);
-                let msg = if body.trim().is_empty() {
+                // With --verify, the sealed layer's compatibility is the real build result; otherwise
+                // trust the LLM's self-assessment.
+                let backward_compatible = if verify_cmd.is_some() {
+                    passed
+                } else {
+                    p.backward_compatible
+                };
+                let compat_notes = if verify_cmd.is_some() && !passed {
+                    "did not pass --verify on its own".to_string()
+                } else {
+                    p.compat_notes.clone()
+                };
+                let rationale = if p.folded > 0 {
+                    format!("{} (merged {} layer(s) so the slice builds)", p.rationale, p.folded)
+                } else {
+                    p.rationale.clone()
+                };
+                let bookmark = ExpansionState::layer_bookmark(&p.slug);
+                let msg = if p.body.trim().is_empty() {
                     title.clone()
                 } else {
-                    format!("{title}\n\n{body}")
+                    format!("{title}\n\n{}", p.body)
                 };
                 let bm = bookmark.clone();
                 scratch.transaction(&mut |tx| {
@@ -316,11 +369,14 @@ impl Engine {
                 })?;
                 self.state.branch_mut(&bookmark).tracked = true;
                 new_layers.push(PersistedLayer {
-                    slug,
+                    slug: p.slug,
                     bookmark,
-                    atom_hashes: hashes,
+                    atom_hashes: p.hashes,
                     title,
-                    body,
+                    body: p.body,
+                    rationale,
+                    backward_compatible,
+                    compat_notes,
                 });
                 parent = id;
             } else {
@@ -368,6 +424,9 @@ impl Engine {
                 atom_hashes: Vec::new(),
                 title: "Remaining changes".into(),
                 body: "Residual changes not captured by earlier layers.".into(),
+                rationale: "binary/residual changes the textual split couldn't place".into(),
+                backward_compatible: true,
+                compat_notes: String::new(),
             });
             parent = id;
             report.note("added a remainder layer to preserve all changes");
@@ -542,8 +601,16 @@ impl Engine {
                 .pr_of(&l.bookmark)
                 .map(|n| format!(" → #{n}"))
                 .unwrap_or_default();
-            report.note(format!("{}. {} [{}]{pr}", i + 1, l.title, l.slug));
+            let warn = if l.backward_compatible { "" } else { " ⚠ may not be self-contained" };
+            report.note(format!("{}. {} [{}]{pr}{warn}", i + 1, l.title, l.slug));
+            if !l.rationale.is_empty() {
+                report.note(format!("    why: {}", l.rationale));
+            }
+            if !l.compat_notes.is_empty() {
+                report.note(format!("    compat: {}", l.compat_notes));
+            }
             if layer.is_some() && !l.body.trim().is_empty() {
+                report.note("    ---");
                 for line in l.body.lines() {
                     report.note(format!("    {line}"));
                 }

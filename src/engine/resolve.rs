@@ -92,6 +92,7 @@ impl Engine {
                     std::fs::write(State::path_for(&self.root), &ckpt.state)?;
                     self.state = State::load(&self.root)?;
                 }
+                self.restore_expansion_snapshot(ckpt);
                 msg
             }
             None => self.vcs.undo().await?,
@@ -236,8 +237,13 @@ impl Engine {
     pub async fn checkpoint(&self) -> Result<()> {
         let op_id = self.vcs.current_op_id().await?;
         let state = std::fs::read_to_string(State::path_for(&self.root)).unwrap_or_default();
+        let expansion = std::fs::read_to_string(ExpansionState::path_for(&self.root)).ok();
         let mut stack = self.load_checkpoints();
-        stack.push(Checkpoint { op_id, state });
+        stack.push(Checkpoint {
+            op_id,
+            state,
+            expansion,
+        });
         // Keep the log bounded; old checkpoints fall off the bottom.
         let len = stack.len();
         if len > MAX_CHECKPOINTS {
@@ -248,6 +254,21 @@ impl Engine {
 
     fn undo_log_path(&self) -> PathBuf {
         self.root.join(".jj").join("jjk").join("undo.json")
+    }
+
+    /// Restore the domain-expansion sidecar to a checkpoint snapshot: rewrite it, or remove it if it
+    /// didn't exist when the checkpoint was taken (so undoing past `domain expansion` deactivates the
+    /// mode, and undoing a `domain collapse` brings it back). Best-effort — never blocks the undo.
+    fn restore_expansion_snapshot(&self, ckpt: &Checkpoint) {
+        let path = ExpansionState::path_for(&self.root);
+        match &ckpt.expansion {
+            Some(content) => {
+                let _ = std::fs::write(&path, content);
+            }
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 
     fn load_checkpoints(&self) -> Vec<Checkpoint> {
@@ -280,6 +301,7 @@ impl Engine {
                     std::fs::write(State::path_for(&self.root), &ckpt.state)?;
                     self.state = State::load(&self.root)?;
                 }
+                self.restore_expansion_snapshot(&ckpt);
                 self.save_checkpoints(&stack)?;
                 msg
             }

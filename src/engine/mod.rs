@@ -41,6 +41,10 @@ const HIERARCHICAL_THRESHOLD: usize = 60;
 struct Checkpoint {
     op_id: String,
     state: String,
+    /// Snapshot of `.jj/jjk/expansion.json` (domain-expansion mode), or `None` if it didn't exist.
+    /// Restored alongside `state` so `undo`/`resolve --abort` keep domain mode consistent with jj.
+    #[serde(default)]
+    expansion: Option<String>,
 }
 
 /// The command to re-run once the stack is conflict-free again. Only commands with a *deferred*
@@ -259,9 +263,14 @@ impl Engine {
         // Env overrides beat per-repo config, so a tougher split can pick a more powerful model /
         // more effort for a single run without editing state: `JJK_LLM_MODEL`, `JJK_LLM_THINKING`.
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        let model = env("JJK_LLM_MODEL").unwrap_or_else(|| self.state.config.llm_model.clone());
-        let thinking =
-            env("JJK_LLM_THINKING").unwrap_or_else(|| self.state.config.llm_thinking.clone());
+        // Precedence: per-run env > per-monolith override (ExpansionState) > per-repo config.
+        let dom = ExpansionState::load(&self.root).ok().flatten();
+        let model = env("JJK_LLM_MODEL")
+            .or_else(|| dom.as_ref().and_then(|d| d.model.clone()))
+            .unwrap_or_else(|| self.state.config.llm_model.clone());
+        let thinking = env("JJK_LLM_THINKING")
+            .or_else(|| dom.as_ref().and_then(|d| d.thinking.clone()))
+            .unwrap_or_else(|| self.state.config.llm_thinking.clone());
         match AnthropicLlm::from_env(&model, &thinking) {
             Some(llm) => Box::new(llm),
             None => Box::new(FakeSplitter::deterministic()),

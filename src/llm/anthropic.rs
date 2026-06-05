@@ -172,6 +172,9 @@ impl Splitter for AnthropicLlm {
             "content": [{"type": "text", "text": user}]
         })];
 
+        // Accumulate token usage across the tool loop so cost & cache hits are visible.
+        let mut usage = Usage::default();
+
         for _ in 0..MAX_ITERS {
             // Cache the stable prefix (tools + system); the volatile catalog message follows it.
             let mut body = json!({
@@ -195,6 +198,7 @@ impl Splitter for AnthropicLlm {
             }
 
             let resp = self.post(&body).await?;
+            usage.add(resp.get("usage"));
             let content = resp
                 .get("content")
                 .and_then(|c| c.as_array())
@@ -213,6 +217,11 @@ impl Splitter for AnthropicLlm {
                             .map_err(|e| {
                                 JjkError::Msg(format!("record_split output didn't match schema: {e}"))
                             })?;
+                    eprintln!(
+                        "domain split: model={model} thinking={budget} atoms={atoms} \
+                         tokens(in={} out={} cache_read={} cache_write={})",
+                        usage.input, usage.output, usage.cache_read, usage.cache_write
+                    );
                     return Ok(plan);
                 }
                 "get_atom_detail" => {
@@ -248,6 +257,26 @@ impl Splitter for AnthropicLlm {
             }
         }
         Err(JjkError::Msg("splitter did not produce a plan within the tool-loop budget".into()).into())
+    }
+}
+
+/// Token usage accumulated across the split's tool-loop turns (for cost/cache observability).
+#[derive(Default)]
+struct Usage {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+}
+
+impl Usage {
+    fn add(&mut self, usage: Option<&Value>) {
+        let Some(u) = usage else { return };
+        let g = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        self.input += g("input_tokens");
+        self.output += g("output_tokens");
+        self.cache_read += g("cache_read_input_tokens");
+        self.cache_write += g("cache_creation_input_tokens");
     }
 }
 

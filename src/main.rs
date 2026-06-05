@@ -419,7 +419,7 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
 
         Command::Domain(DomainCmd::Expansion(args)) => {
             let report = engine
-                .domain_activate(args.mode, args.instruction, args.verify)
+                .domain_activate(args.mode, args.instruction, args.verify, args.model, args.effort)
                 .await?;
             render::print_report(&report);
         }

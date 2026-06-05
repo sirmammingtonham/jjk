@@ -105,7 +105,7 @@ async fn preview_covers_every_changed_file() {
     let (tmp, mut e) = setup().await;
     monolith(&mut e, tmp.path()).await;
 
-    e.domain_activate(Mode::Change, None, None).await.unwrap();
+    e.domain_activate(Mode::Change, None, None, None, None).await.unwrap();
     // Force the offline splitter so the test never reaches the network.
     e.set_splitter(Box::new(FakeSplitter::deterministic()));
 
@@ -124,7 +124,7 @@ async fn preview_covers_every_changed_file() {
 async fn engine_respects_the_splitter_grouping_without_reclustering() {
     let (tmp, mut e) = setup().await;
     monolith(&mut e, tmp.path()).await;
-    e.domain_activate(Mode::Feature, None, None).await.unwrap();
+    e.domain_activate(Mode::Feature, None, None, None, None).await.unwrap();
 
     // Three added files → three atoms (labels a0..a2). Script a single-layer plan; the engine must
     // honor it (not split by connected components, which would give three layers).
@@ -156,7 +156,7 @@ async fn status_reflects_activation_and_collapse_clears_it() {
     let before = e.domain_status().await.unwrap().notes.join("\n");
     assert!(before.contains("not active"));
 
-    e.domain_activate(Mode::Slice, Some("group by API surface".into()), None)
+    e.domain_activate(Mode::Slice, Some("group by API surface".into()), None, None, None)
         .await
         .unwrap();
     let active = e.domain_status().await.unwrap().notes.join("\n");
@@ -174,7 +174,7 @@ async fn reconstruct_builds_a_tree_equivalent_stack() {
     let (tmp, mut e) = setup().await;
     let root = tmp.path().to_path_buf();
     monolith(&mut e, &root).await;
-    e.domain_activate(Mode::Change, None, None).await.unwrap();
+    e.domain_activate(Mode::Change, None, None, None, None).await.unwrap();
 
     // 3 added files → atoms a0..a2. Script two layers; the engine must build a stack whose top tree
     // equals the monolith and whose bottom layer is a strict subset.
@@ -227,7 +227,7 @@ async fn submit_in_domain_mode_opens_a_pr_per_layer_with_correct_bases() {
     h.engine.commit("feature: work").await.unwrap();
 
     h.engine
-        .domain_activate(Mode::Change, None, None)
+        .domain_activate(Mode::Change, None, None, None, None)
         .await
         .unwrap();
     let plan = SplitPlan {
@@ -275,7 +275,7 @@ async fn review_abort_creates_nothing() {
     write(&root, "b.rs", "fn b() {}\n");
     h.engine.commit("feature: work").await.unwrap();
     h.engine
-        .domain_activate(Mode::Change, None, None)
+        .domain_activate(Mode::Change, None, None, None, None)
         .await
         .unwrap();
     h.engine.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
@@ -304,7 +304,7 @@ async fn review_edit_substitutes_the_plan() {
     write(&root, "b.rs", "fn b() {}\n");
     h.engine.commit("feature: work").await.unwrap();
     h.engine
-        .domain_activate(Mode::Change, None, None)
+        .domain_activate(Mode::Change, None, None, None, None)
         .await
         .unwrap();
     // Splitter proposes two layers; the reviewer edits it down to one.
@@ -334,7 +334,7 @@ async fn re_submit_after_editing_monolith_keeps_pr_numbers() {
     write(&root, "ui.rs", "fn render() {}\n");
     h.engine.commit("feature: work").await.unwrap();
     h.engine
-        .domain_activate(Mode::Change, None, None)
+        .domain_activate(Mode::Change, None, None, None, None)
         .await
         .unwrap();
     h.engine.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
@@ -367,7 +367,7 @@ async fn domain_sync_keeps_the_stack_stable() {
     write(&root, "ui.rs", "fn render() {}\n");
     h.engine.commit("feature: work").await.unwrap();
     h.engine
-        .domain_activate(Mode::Change, None, None)
+        .domain_activate(Mode::Change, None, None, None, None)
         .await
         .unwrap();
     h.engine.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
@@ -414,7 +414,7 @@ async fn domain_sync_surfaces_monolith_rebase_conflicts() {
     write(&root, "shared.rs", "feature change\n");
     h.engine.commit("feature: edit shared").await.unwrap();
     h.engine
-        .domain_activate(Mode::Change, None, None)
+        .domain_activate(Mode::Change, None, None, None, None)
         .await
         .unwrap();
     h.engine.set_splitter(Box::new(FakeSplitter::deterministic()));
@@ -452,7 +452,7 @@ async fn hierarchical_split_for_large_changesets() {
         write(&root, &format!("f{i}.rs"), &format!("fn f{i}() {{}}\n"));
     }
     e.commit("feature: big change").await.unwrap();
-    e.domain_activate(Mode::Change, None, None).await.unwrap();
+    e.domain_activate(Mode::Change, None, None, None, None).await.unwrap();
     e.set_splitter(Box::new(OneLayerSplitter));
 
     e.domain_expand(/*preview=*/ false).await.unwrap();
@@ -476,7 +476,7 @@ async fn verify_passing_keeps_all_layers() {
     let (tmp, mut e) = setup().await;
     let root = tmp.path().to_path_buf();
     monolith(&mut e, &root).await;
-    e.domain_activate(Mode::Change, None, Some("true".into())) // `true` passes for every layer
+    e.domain_activate(Mode::Change, None, Some("true".into()), None, None) // `true` passes for every layer
         .await
         .unwrap();
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
@@ -493,7 +493,7 @@ async fn verify_failure_folds_layers_forward() {
     let (tmp, mut e) = setup().await;
     let root = tmp.path().to_path_buf();
     monolith(&mut e, &root).await;
-    e.domain_activate(Mode::Change, None, Some("false".into())) // `false` fails every layer
+    e.domain_activate(Mode::Change, None, Some("false".into()), None, None) // `false` fails every layer
         .await
         .unwrap();
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
@@ -511,4 +511,64 @@ async fn verify_failure_folds_layers_forward() {
     let monolith_tip = resolve_tip(&e, "feature").await;
     let top = resolve_tip(&e, &format!("jjk/layer/{}", st.layers[0].slug)).await;
     assert!(e.vcs().trees_equal(&top, &monolith_tip).await.unwrap());
+}
+
+#[tokio::test]
+async fn undo_reverts_domain_activation() {
+    let (tmp, mut e) = setup().await;
+    monolith(&mut e, tmp.path()).await;
+    // main records a checkpoint before each mutating command; mirror that here.
+    e.checkpoint().await.unwrap();
+    e.domain_activate(Mode::Change, None, None, None, None)
+        .await
+        .unwrap();
+    assert!(ExpansionState::load(tmp.path()).unwrap().is_some());
+
+    e.undo().await.unwrap();
+    assert!(
+        ExpansionState::load(tmp.path()).unwrap().is_none(),
+        "undo of activation removes the expansion.json sidecar"
+    );
+}
+
+#[tokio::test]
+async fn status_and_explain_surface_compat_and_rationale() {
+    let (tmp, mut e) = setup().await;
+    let root = tmp.path().to_path_buf();
+    monolith(&mut e, &root).await;
+    e.domain_activate(Mode::Change, None, None, None, None)
+        .await
+        .unwrap();
+    let plan = SplitPlan {
+        layers: vec![LayerSpec {
+            slug: "risky".into(),
+            atoms: vec!["a0".into(), "a1".into(), "a2".into()],
+            title: "Risky layer".into(),
+            body: "body".into(),
+            rationale: "groups the whole API surface".into(),
+            backward_compatible: false,
+            compat_notes: "calls helper() before it is defined".into(),
+        }],
+    };
+    e.set_splitter(Box::new(FakeSplitter::scripted(plan)));
+    e.domain_expand(false).await.unwrap();
+
+    let status = e.domain_status().await.unwrap().notes.join("\n");
+    assert!(status.contains('⚠'), "status flags the risky layer: {status}");
+    assert!(status.contains("calls helper() before it is defined"));
+
+    let explain = e.domain_explain(Some("risky".into())).await.unwrap().notes.join("\n");
+    assert!(explain.contains("groups the whole API surface"), "explain shows rationale: {explain}");
+}
+
+#[tokio::test]
+async fn model_and_effort_persist_for_the_monolith() {
+    let (tmp, mut e) = setup().await;
+    monolith(&mut e, tmp.path()).await;
+    e.domain_activate(Mode::Change, None, None, Some("opus".into()), Some("max".into()))
+        .await
+        .unwrap();
+    let st = ExpansionState::load(tmp.path()).unwrap().unwrap();
+    assert_eq!(st.model.as_deref(), Some("opus"));
+    assert_eq!(st.thinking.as_deref(), Some("max"));
 }

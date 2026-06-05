@@ -53,6 +53,19 @@ pub struct PersistedLayer {
     pub atom_hashes: Vec<String>,
     pub title: String,
     pub body: String,
+    /// Why these atoms were grouped (the splitter's rationale) — shown by `domain explain`.
+    #[serde(default)]
+    pub rationale: String,
+    /// Whether this layer is judged safe to merge on its own (LLM self-review, or `--verify` result).
+    #[serde(default = "default_true")]
+    pub backward_compatible: bool,
+    /// Any flagged backward-compat risk for this layer.
+    #[serde(default)]
+    pub compat_notes: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Domain-expansion mode state for a repo. Present ⇒ auto-stacking active.
@@ -67,6 +80,14 @@ pub struct ExpansionState {
     /// Opt-in per-layer build/test command (the hard backward-compat gate).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_cmd: Option<String>,
+    /// Per-monolith splitter model override (`auto`/id/`opus`/`sonnet`/`haiku`); env `JJK_LLM_MODEL`
+    /// still wins. `None` ⇒ fall back to `state.config.llm_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Per-monolith thinking-effort override (`auto`/`off`/`low`/`high`/`max`/number); env
+    /// `JJK_LLM_THINKING` still wins. `None` ⇒ fall back to `state.config.llm_thinking`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     /// The reconstructed layers, bottom→top. Empty until the first expansion.
     #[serde(default)]
     pub layers: Vec<PersistedLayer>,
@@ -88,6 +109,8 @@ impl ExpansionState {
             mode,
             instruction: None,
             verify_cmd: None,
+            model: None,
+            thinking: None,
             layers: Vec::new(),
             monolith_commit: None,
         }

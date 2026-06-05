@@ -123,6 +123,14 @@ pub struct DomainExpansionArgs {
     /// Build/test command to verify each layer is self-contained (opt-in hard gate).
     #[arg(long)]
     pub verify: Option<String>,
+    /// Splitter model for this monolith: `auto`, a model id, or `opus`/`sonnet`/`haiku`.
+    /// (Per-run `JJK_LLM_MODEL` still wins; persists for the monolith.)
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Thinking effort for the splitter: `auto`, `off`, `low`, `high`, `max`, or a token budget.
+    /// (Per-run `JJK_LLM_THINKING` still wins; persists for the monolith.)
+    #[arg(long)]
+    pub effort: Option<String>,
 }
 
 #[derive(Args, Debug)]
