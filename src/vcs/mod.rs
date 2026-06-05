@@ -6,7 +6,7 @@
 pub mod jj_cli;
 
 use crate::error::Result;
-use crate::model::{Bookmark, Capabilities, ChangeId, CommitInfo, WorkspaceInfo};
+use crate::model::{Bookmark, Capabilities, ChangeId, CommitInfo, FileDiff, WorkspaceInfo};
 use async_trait::async_trait;
 use std::path::Path;
 
@@ -86,6 +86,15 @@ pub trait Vcs: Send + Sync {
 
     /// Human-readable diff for a revset (e.g. `base..tip`). Non-snapshotting.
     async fn diff(&self, revset: &str) -> Result<String>;
+
+    /// Structured per-file unified-diff hunks for the change from `from` to `to`
+    /// (`jj diff --git --from <from> --to <to>`). Content diff between two trees, independent of
+    /// ancestry. Non-snapshotting. Used by domain-expansion to atomize a changeset.
+    async fn diff_hunks(&self, from: &ChangeId, to: &ChangeId) -> Result<Vec<FileDiff>>;
+
+    /// Whether `a` and `b` have identical trees (content equality, ignoring ancestry/message): the
+    /// `from`/`to` diff is empty. Used to assert a reconstructed stack's tip equals the monolith.
+    async fn trees_equal(&self, a: &ChangeId, b: &ChangeId) -> Result<bool>;
 
     /// Repo-root-relative paths that are conflicted in `rev` (`jj resolve --list -r <rev>`); empty
     /// when there are none. A display helper for guiding conflict resolution — best-effort, so

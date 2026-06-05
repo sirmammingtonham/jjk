@@ -1,5 +1,6 @@
 //! CLI vocabulary (clap derive). Pure parsing — no logic. git/git-spice verbs map to engine calls.
 
+use crate::engine::expansion::Mode;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -89,8 +90,52 @@ pub enum Command {
     /// Fetch trunk, reconcile merged branches, rebase the stack, then push & retarget PRs.
     Sync(SyncArgs),
 
+    /// Experimental: auto-stack a single monolith branch into reviewable PRs (Domain Expansion).
+    #[command(subcommand)]
+    Domain(DomainCmd),
+
     /// Friendly note: jjk has no staging area of its own but honors git's (D1).
     Add,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DomainCmd {
+    /// Activate domain expansion on the current branch (the monolith).
+    Expansion(DomainExpansionArgs),
+    /// Show the monolith ↔ layer-stack mapping (read-only).
+    Status,
+    /// Explain each layer's contents and the split rationale (read-only).
+    Explain(DomainExplainArgs),
+    /// (Re)build the layer stack locally for inspection — no PRs.
+    Expand(DomainExpandArgs),
+    /// Deactivate: forget the layer bookmarks, keep the monolith.
+    Collapse,
+}
+
+#[derive(Args, Debug)]
+pub struct DomainExpansionArgs {
+    /// How to split: feature (few coherent PRs), change (self-contained), or slice (many thin).
+    #[arg(long, value_enum, default_value_t = Mode::Change)]
+    pub mode: Mode,
+    /// Extra natural-language splitting guidance for the LLM.
+    #[arg(long)]
+    pub instruction: Option<String>,
+    /// Build/test command to verify each layer is self-contained (opt-in hard gate).
+    #[arg(long)]
+    pub verify: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct DomainExplainArgs {
+    /// Limit to a single layer (by slug); default shows all.
+    pub layer: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct DomainExpandArgs {
+    /// Print the proposed split without materializing layer bookmarks.
+    #[arg(long)]
+    pub preview: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -177,6 +222,9 @@ pub struct SubmitArgs {
     /// Open newly-created PRs as drafts.
     #[arg(long)]
     pub draft: bool,
+    /// Domain expansion: accept the proposed split without the interactive review gate.
+    #[arg(long = "no-review", visible_alias = "yes", short = 'y')]
+    pub no_review: bool,
 }
 
 #[derive(Args, Debug)]

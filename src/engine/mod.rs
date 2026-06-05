@@ -1,12 +1,16 @@
 //! The engine: each verb → an ordered plan of (VCS ops, state updates, forge ops). Depends only on
 //! the `Vcs`/`Forge` traits and `model` types — never on a concrete backend.
 
+pub mod expansion;
 pub mod stack;
 
+use crate::engine::expansion::{ExpansionState, Materialized, Mode, PersistedLayer};
 use crate::error::{JjkError, Result};
 use crate::forge::Forge;
+use crate::llm::Splitter;
+use crate::model::FileChangeKind;
 use crate::model::{ChangeId, CommitInfo, PrRef, PrState};
-use crate::prompt::{AutoFill, PrDraft, Prompter};
+use crate::prompt::{AutoFill, PrDraft, Prompter, SplitReview};
 use crate::state::State;
 use crate::text::plural;
 use crate::vcs::{CommitScope, PushOpts, Vcs};
@@ -102,6 +106,9 @@ pub struct Engine {
     /// How `submit` gathers details for a new PR. Defaults to [`AutoFill`] (non-interactive); `main`
     /// installs a terminal prompter when stdio is a tty and `--fill` wasn't passed.
     prompter: Box<dyn Prompter>,
+    /// Domain-expansion splitter, built on first use: the Anthropic adapter when an API key is
+    /// present, else a deterministic offline fallback. Injected directly by tests.
+    splitter: std::cell::OnceCell<Box<dyn Splitter>>,
 }
 
 impl Engine {
@@ -118,6 +125,7 @@ impl Engine {
             forge_backend: forge_backend.into(),
             forge: std::cell::OnceCell::new(),
             prompter: Box::new(AutoFill),
+            splitter: std::cell::OnceCell::new(),
         }
     }
 
@@ -218,6 +226,29 @@ impl Engine {
     /// Replace the forge adapter (used by tests to inject a fake).
     pub fn set_forge(&mut self, forge: Box<dyn Forge>) {
         self.forge = std::cell::OnceCell::from(forge);
+    }
+
+    /// Replace the domain-expansion splitter (tests inject a [`FakeSplitter`](crate::llm::FakeSplitter)).
+    pub fn set_splitter(&mut self, splitter: Box<dyn Splitter>) {
+        self.splitter = std::cell::OnceCell::from(splitter);
+    }
+
+    /// The splitter, built on first use: the Anthropic adapter when `ANTHROPIC_API_KEY` is set, else
+    /// a deterministic offline fallback (so expansion still yields a valid — if unrefined — stack).
+    fn splitter(&self) -> &dyn Splitter {
+        if self.splitter.get().is_none() {
+            let _ = self.splitter.set(self.build_splitter());
+        }
+        self.splitter.get().expect("just initialized").as_ref()
+    }
+
+    fn build_splitter(&self) -> Box<dyn Splitter> {
+        use crate::llm::anthropic::AnthropicLlm;
+        use crate::llm::FakeSplitter;
+        match AnthropicLlm::from_env(self.state.config.llm_model.clone()) {
+            Some(llm) => Box::new(llm),
+            None => Box::new(FakeSplitter::deterministic()),
+        }
     }
 
     /// The forge, built on first use (querying the remote only when a forge command runs).
@@ -329,15 +360,26 @@ impl Engine {
 
     /// Reconstruct the stack containing `@` from jj. Bottom (nearest trunk) → top.
     pub async fn derive_stack(&self) -> Result<Stack> {
+        self.derive_stack_at(None).await
+    }
+
+    /// Like [`derive_stack`](Engine::derive_stack) but anchored at an explicit position instead of
+    /// the working copy. `None` anchors at `@` (the normal view); `Some(tip)` derives the stack
+    /// ending at `tip`. Domain-expansion uses the latter to operate on the reconstructed layer
+    /// chain (anchored at the top layer) while `@` stays on the monolith.
+    pub async fn derive_stack_at(&self, anchor: Option<&ChangeId>) -> Result<Stack> {
         // The trunk-bookmark resolution and the current-branch-tip query are independent reads;
         // issue them concurrently (one round-trip instead of two). Mirrors `trunk_anchor` +
         // `current_branch_tip`, kept inline so both can share a single `resolve_many`.
         let tname = self.state.config.trunk.clone();
+        let anchor_rev: String = anchor
+            .map(|c| c.as_str().to_string())
+            .unwrap_or_else(|| "@".to_string());
         let batch = self
             .vcs
             .resolve_many(&[
                 &format!("bookmarks(exact:{tname:?})"),
-                &format!("heads(::@ & {STACK_BOOKMARKS})"),
+                &format!("heads(::{anchor_rev} & {STACK_BOOKMARKS})"),
             ])
             .await?;
         let (trunk_revset, trunk_id) = match batch[0].first() {
@@ -1629,10 +1671,26 @@ impl Engine {
     /// yet) the installed [`Prompter`] gathers the title/body/draft; existing PRs are just updated.
     pub async fn submit_with(&mut self, scope: SubmitScope, opts: SubmitOptions) -> Result<Report> {
         let mut report = Report::default();
-        self.ensure_fresh(&mut report).await?;
-        let stack = self.derive_stack().await?;
+        // Domain expansion (if active): (re)build the layer stack from the monolith first, then
+        // submit operates on that stack anchored at its top layer. `None` = ordinary jjk.
+        let anchor = self.maybe_expand_monolith(opts.no_review, &mut report).await?;
+        if anchor.is_none() {
+            self.ensure_fresh(&mut report).await?;
+        }
+        let stack = self.derive_stack_at(anchor.as_ref()).await?;
         let remote = self.state.config.remote.clone();
         let trunk_name = stack.trunk_name.clone();
+        // Domain expansion: use the splitter's per-layer PR body (keyed by layer bookmark) instead of
+        // the commit-subject default, so each PR explains its slice (plan §7).
+        let layer_bodies: std::collections::HashMap<String, String> = ExpansionState::load(&self.root)?
+            .map(|st| {
+                st.layers
+                    .into_iter()
+                    .filter(|l| !l.body.trim().is_empty())
+                    .map(|l| (l.bookmark, l.body))
+                    .collect()
+            })
+            .unwrap_or_default();
         // Easter egg: a user can opt a PR-body flourish in via their jj config (undocumented).
         let yuji = self.vcs.config_get(YUJI_KEY).await?.as_deref() == Some(YUJI_VALUE);
 
@@ -1657,11 +1715,15 @@ impl Engine {
                 .map(|c| c.subject().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| b.name.clone());
+            let body = layer_bodies
+                .get(&b.name)
+                .cloned()
+                .unwrap_or_else(|| pr_body(b, &base));
             plan.push(Item {
                 name: b.name.clone(),
                 base: base.clone(),
                 title,
-                body: pr_body(b, &base),
+                body,
                 on_remote: tip_on_remote(b, &remote),
             });
             prev_tracked = Some(b.name.clone());
@@ -1858,6 +1920,11 @@ impl Engine {
     /// empty/immutable handling. With `push = false`, only local state is reconciled (no force-push,
     /// no PR retarget, no remote deletions).
     pub async fn sync(&mut self, push: bool) -> Result<Report> {
+        // Domain expansion: the stack is a derived artifact, so sync rebases the *monolith* onto the
+        // advanced trunk and re-expands, rather than reconciling user-managed branches.
+        if ExpansionState::load(&self.root)?.is_some() {
+            return self.sync_domain(push).await;
+        }
         let mut report = Report::default();
 
         // 1. Capture branch→PR BEFORE fetching: a merge-commit landing absorbs the merged branch
@@ -2026,6 +2093,651 @@ impl Engine {
     }
 }
 
+// ---------------------------------------------------------------- domain expansion (experimental)
+
+impl Engine {
+    /// `jjk domain expansion` — activate auto-stacking on the current branch (the monolith). Records
+    /// mode/instruction/verify in the sidecar; the actual split happens on the next `submit`/`sync`
+    /// (or `domain expand`).
+    pub async fn domain_activate(
+        &mut self,
+        mode: Mode,
+        instruction: Option<String>,
+        verify: Option<String>,
+    ) -> Result<Report> {
+        let mut report = Report::default();
+        let branch = self.current_branch().await?.ok_or(JjkError::NotOnBranch)?;
+        let mut st = ExpansionState::load(&self.root)?
+            .unwrap_or_else(|| ExpansionState::new(branch.clone(), mode));
+        st.monolith = branch.clone();
+        st.mode = mode;
+        st.instruction = instruction;
+        st.verify_cmd = verify;
+        st.save(&self.root)?;
+        report.note(format!("domain expansion active on '{branch}' (mode: {mode})"));
+        report.note("run `jjk submit` to split it into a reviewable stack");
+        Ok(report)
+    }
+
+    /// `jjk domain status` — read-only map of the monolith and its generated layers.
+    pub async fn domain_status(&self) -> Result<Report> {
+        let mut report = Report::default();
+        let Some(st) = ExpansionState::load(&self.root)? else {
+            report.note("domain expansion is not active (run `jjk domain expansion`)");
+            return Ok(report);
+        };
+        report.note(format!("monolith: {} (mode: {})", st.monolith, st.mode));
+        if let Some(instr) = &st.instruction {
+            report.note(format!("instruction: {instr}"));
+        }
+        if let Some(v) = &st.verify_cmd {
+            report.note(format!("verify: {v}"));
+        }
+        if st.layers.is_empty() {
+            report.note("no layers yet — run `jjk submit` or `jjk domain expand`");
+        } else {
+            report.note(format!("{} layer(s) (bottom→top):", st.layers.len()));
+            for (i, l) in st.layers.iter().enumerate() {
+                let pr = self
+                    .state
+                    .pr_of(&l.bookmark)
+                    .map(|n| format!(" → #{n}"))
+                    .unwrap_or_default();
+                report.note(format!("  {}. {} [{}]{}", i + 1, l.title, l.slug, pr));
+            }
+        }
+        Ok(report)
+    }
+
+    /// Compute the proposed split: diff the monolith over trunk, atomize, build dependency hints,
+    /// ask the splitter to draw the boundaries, then enforce the completeness invariant. The LLM
+    /// owns the grouping/ordering; this only guarantees every atom is placed exactly once.
+    async fn compute_split(&self, st: &ExpansionState) -> Result<expansion::ResolvedSplit> {
+        let monolith_tip = self.branch_tip(&st.monolith).await?;
+        let (trunk_revset, trunk_id) = self.trunk_anchor().await?;
+        let files = self.vcs.diff_hunks(&trunk_id, &monolith_tip).await?;
+        let atoms = expansion::extract_atoms(&files);
+        if atoms.is_empty() {
+            return Err(JjkError::Msg(format!(
+                "'{}' has no changes over trunk to split",
+                st.monolith
+            ))
+            .into());
+        }
+        let edges = expansion::build_edges(&atoms);
+        // The monolith's own commit subjects are a free grouping signal (bottom→top).
+        let mut commits = self
+            .vcs
+            .resolve(&format!("{trunk_revset}..{}", monolith_tip.as_str()))
+            .await?;
+        commits.reverse();
+        let commit_subjects: Vec<String> = commits
+            .iter()
+            .map(|c| c.subject().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let input = expansion::build_split_input(
+            st.mode,
+            st.instruction.clone(),
+            &atoms,
+            &edges,
+            &files,
+            commit_subjects,
+        );
+        let mut plan = self.splitter().split(&input).await?;
+        expansion::repair_completeness(&mut plan, atoms.len());
+        Ok(expansion::ResolvedSplit {
+            atoms,
+            files,
+            trunk: trunk_id,
+            monolith_tip,
+            plan,
+        })
+    }
+
+    /// Scratch jj workspace path for reconstruction (outside the repo so it can't nest).
+    fn scratch_workspace_path(&self) -> PathBuf {
+        let stem = self
+            .root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("repo");
+        std::env::temp_dir().join(format!("jjk-expand-{stem}-{}", std::process::id()))
+    }
+
+    /// Rebuild the layer chain `jjk/layer/*` off trunk from `resolved.plan`, in an isolated scratch
+    /// workspace (the user's working copy is never touched). Materializes each layer's cumulative
+    /// file content with the patch-subset applier, then asserts `trees_equal(top, monolith)` and
+    /// appends a remainder commit if anything is residual — so changes are never lost. Returns the
+    /// top layer's change id (the submit/sync anchor). Updates `st.layers` and tracked state.
+    async fn reconstruct_layers(
+        &mut self,
+        st: &mut ExpansionState,
+        resolved: &expansion::ResolvedSplit,
+        report: &mut Report,
+    ) -> Result<ChangeId> {
+        let ws_name = "jjk-expand";
+        let scratch_dir = self.scratch_workspace_path();
+        // Clean up any leftovers from a previous aborted run, then add a fresh workspace at trunk.
+        let _ = self.vcs.forget_workspace(ws_name).await;
+        let _ = std::fs::remove_dir_all(&scratch_dir);
+        self.vcs
+            .add_workspace(&scratch_dir, ws_name, &resolved.trunk)
+            .await?;
+        let scratch = crate::vcs::jj_cli::JjCli::new(&scratch_dir);
+
+        // Reconstruct inside a guard so we always tear the scratch workspace down.
+        let result = self
+            .reconstruct_inner(&scratch, &scratch_dir, st, resolved, report)
+            .await;
+
+        // Teardown (best-effort) regardless of outcome.
+        let _ = self.vcs.forget_workspace(ws_name).await;
+        let _ = std::fs::remove_dir_all(&scratch_dir);
+
+        result
+    }
+
+    async fn reconstruct_inner(
+        &mut self,
+        scratch: &crate::vcs::jj_cli::JjCli,
+        scratch_dir: &Path,
+        st: &mut ExpansionState,
+        resolved: &expansion::ResolvedSplit,
+        report: &mut Report,
+    ) -> Result<ChangeId> {
+        use std::collections::HashMap;
+        use std::fs;
+
+        // 1. Read each non-added touched file's trunk content (the applier's base) from the scratch
+        //    working copy, which currently sits at trunk.
+        let mut base: HashMap<String, String> = HashMap::new();
+        for f in &resolved.files {
+            let src = match f.change {
+                FileChangeKind::Added => None,
+                FileChangeKind::Renamed => f.old_path.clone(),
+                _ => Some(f.path.clone()),
+            };
+            if let Some(p) = src {
+                if let Ok(content) = fs::read_to_string(scratch_dir.join(&p)) {
+                    base.insert(p, content);
+                }
+            }
+        }
+
+        // 2. Build each layer bottom→top, accumulating included hunks per file.
+        let mut parent = resolved.trunk.clone();
+        let mut included: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut new_layers: Vec<PersistedLayer> = Vec::new();
+        let mut layer_ids: Vec<ChangeId> = Vec::new();
+
+        for layer in &resolved.plan.layers {
+            let mut atom_hashes = Vec::new();
+            for label in &layer.atoms {
+                let Some(ai) = expansion::label_index(label) else {
+                    continue;
+                };
+                let Some(atom) = resolved.atoms.get(ai) else {
+                    continue;
+                };
+                atom_hashes.push(atom.id.clone());
+                let acc = included.entry(atom.file_idx).or_default();
+                for &h in &atom.hunks {
+                    if !acc.contains(&h) {
+                        acc.push(h);
+                    }
+                }
+            }
+
+            // New empty commit on the previous layer (or trunk), made `@` in the scratch workspace.
+            let mut new_id: Option<ChangeId> = None;
+            scratch.transaction(&mut |tx| {
+                new_id = Some(tx.new_child(&parent)?);
+                Ok(())
+            })?;
+            let id = new_id.expect("new_child returns an id");
+
+            // Materialize cumulative content for every touched file.
+            for (&fi, hidxs) in &included {
+                let f = &resolved.files[fi];
+                let base_content = match f.change {
+                    FileChangeKind::Added => None,
+                    FileChangeKind::Renamed => f.old_path.as_deref().and_then(|p| base.get(p)),
+                    _ => base.get(&f.path),
+                };
+                match expansion::materialize_file(base_content.map(String::as_str), f, hidxs)? {
+                    Materialized::Write(content) => {
+                        let abs = scratch_dir.join(&f.path);
+                        if let Some(dir) = abs.parent() {
+                            fs::create_dir_all(dir)?;
+                        }
+                        fs::write(&abs, content)?;
+                        if f.change == FileChangeKind::Renamed {
+                            if let Some(old) = &f.old_path {
+                                let _ = fs::remove_file(scratch_dir.join(old));
+                            }
+                        }
+                    }
+                    Materialized::Delete => {
+                        let _ = fs::remove_file(scratch_dir.join(&f.path));
+                    }
+                    Materialized::Skip => {} // binary — remainder handles it
+                }
+            }
+
+            scratch.snapshot().await?; // capture the working copy into `id`
+            let bookmark = ExpansionState::layer_bookmark(&layer.slug);
+            let msg = if layer.body.trim().is_empty() {
+                layer.title.clone()
+            } else {
+                format!("{}\n\n{}", layer.title, layer.body)
+            };
+            let bm = bookmark.clone();
+            scratch.transaction(&mut |tx| {
+                tx.describe(&id, &msg)?;
+                tx.set_bookmark(&bm, &id)?;
+                Ok(())
+            })?;
+            self.state.branch_mut(&bookmark).tracked = true;
+            new_layers.push(PersistedLayer {
+                slug: layer.slug.clone(),
+                bookmark,
+                atom_hashes,
+                title: layer.title.clone(),
+                body: layer.body.clone(),
+            });
+            layer_ids.push(id.clone());
+            parent = id;
+        }
+
+        // 3. Equivalence gate: if the reconstructed top doesn't match the monolith (binary files, a
+        //    no-trailing-newline edge case, etc.), append a remainder commit whose tree == monolith.
+        if !self.vcs.trees_equal(&parent, &resolved.monolith_tip).await? {
+            let mut rem_id: Option<ChangeId> = None;
+            scratch.transaction(&mut |tx| {
+                rem_id = Some(tx.new_child(&parent)?);
+                Ok(())
+            })?;
+            let id = rem_id.expect("new_child returns an id");
+            scratch.restore_all_from(&resolved.monolith_tip).await?;
+            scratch.snapshot().await?;
+            let bm = ExpansionState::layer_bookmark("remainder");
+            let bmc = bm.clone();
+            scratch.transaction(&mut |tx| {
+                tx.describe(&id, "Remaining changes\n\nResidual not captured by earlier layers.")?;
+                tx.set_bookmark(&bmc, &id)?;
+                Ok(())
+            })?;
+            self.state.branch_mut(&bm).tracked = true;
+            new_layers.push(PersistedLayer {
+                slug: "remainder".into(),
+                bookmark: bm,
+                atom_hashes: Vec::new(),
+                title: "Remaining changes".into(),
+                body: "Residual changes not captured by earlier layers.".into(),
+            });
+            layer_ids.push(id.clone());
+            parent = id;
+            report.note("added a remainder layer to preserve all changes");
+        }
+
+        // 4. Hard invariant: the stack tip must equal the monolith, or we abort (never lose changes).
+        if !self.vcs.trees_equal(&parent, &resolved.monolith_tip).await? {
+            return Err(JjkError::Msg(
+                "reconstruction did not match the monolith — aborting so no changes are lost".into(),
+            )
+            .into());
+        }
+
+        // 4b. Opt-in hard backward-compat gate: check out each layer in the scratch workspace and
+        //     run the verify command. Failures are surfaced (a layer that can't build alone breaks
+        //     trunk if merged first); the user can refine the split via --mode/--instruction.
+        if let Some(cmd) = st.verify_cmd.clone() {
+            let mut failures = Vec::new();
+            for (i, id) in layer_ids.iter().enumerate() {
+                scratch.transaction(&mut |tx| tx.edit(id))?;
+                scratch.snapshot().await?; // materialize this layer's tree in the scratch wc
+                let ok = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .current_dir(scratch_dir)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !ok {
+                    failures.push(new_layers[i].slug.clone());
+                }
+            }
+            if failures.is_empty() {
+                report.note(format!("verified all layers with `{cmd}`"));
+            } else {
+                report.note(format!(
+                    "⚠ verify (`{cmd}`) failed for: {} — these layers may not be self-contained; \
+                     refine with --instruction/--mode or merge them",
+                    failures.join(", ")
+                ));
+            }
+        }
+
+        // 5. Forget layer bookmarks from a previous expansion that no longer exist.
+        let keep: std::collections::HashSet<&str> =
+            new_layers.iter().map(|l| l.bookmark.as_str()).collect();
+        let stale: Vec<String> = st
+            .layers
+            .iter()
+            .map(|l| l.bookmark.clone())
+            .filter(|b| !keep.contains(b.as_str()))
+            .collect();
+        if !stale.is_empty() {
+            self.vcs.transaction(&mut |tx| {
+                for b in &stale {
+                    let _ = tx.forget_bookmark(b);
+                }
+                Ok(())
+            })?;
+            for b in &stale {
+                self.state.branches.remove(b);
+            }
+        }
+
+        st.layers = new_layers;
+        st.monolith_commit = self
+            .vcs
+            .resolve(resolved.monolith_tip.as_str())
+            .await?
+            .into_iter()
+            .next()
+            .map(|c| c.commit_id.0);
+
+        report.note(format!(
+            "reconstructed {} layer{} from '{}'",
+            st.layers.len(),
+            if st.layers.len() == 1 { "" } else { "s" },
+            st.monolith
+        ));
+        Ok(parent)
+    }
+
+    /// If domain mode is active, (re)expand the monolith into the `jjk/layer/*` stack and return the
+    /// top layer's change id (the anchor `submit`/`sync` then operate on). `None` ⇒ not in domain
+    /// mode (caller proceeds with the ordinary `@`-anchored stack). Runs the review gate unless
+    /// `skip_review`. Reuses any surviving layer's bookmark→PR via atom-hash matching.
+    async fn maybe_expand_monolith(
+        &mut self,
+        skip_review: bool,
+        report: &mut Report,
+    ) -> Result<Option<ChangeId>> {
+        let Some(mut st) = ExpansionState::load(&self.root)? else {
+            return Ok(None);
+        };
+        self.ensure_fresh(report).await?;
+
+        // Fast path: if the monolith hasn't moved since the last expansion and all layer bookmarks
+        // still exist, reuse the existing stack — no re-split, no commit/PR churn on idempotent runs.
+        let monolith_commit = self
+            .vcs
+            .resolve(&format!("bookmarks(exact:{:?})", st.monolith))
+            .await?
+            .into_iter()
+            .next()
+            .map(|c| c.commit_id.0);
+        if monolith_commit.is_some()
+            && st.monolith_commit == monolith_commit
+            && !st.layers.is_empty()
+        {
+            let bms = self.vcs.bookmarks().await?;
+            let all_present = st
+                .layers
+                .iter()
+                .all(|l| bms.iter().any(|b| b.name == l.bookmark));
+            if all_present {
+                if let Some(top) = self
+                    .resolve_bookmark(&st.layers.last().expect("non-empty").bookmark)
+                    .await?
+                {
+                    return Ok(Some(top));
+                }
+            }
+        }
+
+        let mut resolved = self.compute_split(&st).await?;
+        expansion::match_layers(&mut resolved.plan, &st.layers, &resolved.atoms);
+        if !skip_review {
+            let changed = expansion::changed_layers(&resolved.plan, &st.layers, &resolved.atoms);
+            match self.prompter.review_split(&resolved.plan, &changed)? {
+                SplitReview::Accept => {}
+                SplitReview::Edit(p) => {
+                    resolved.plan = p;
+                    expansion::repair_completeness(&mut resolved.plan, resolved.atoms.len());
+                    expansion::match_layers(&mut resolved.plan, &st.layers, &resolved.atoms);
+                }
+                SplitReview::Abort => {
+                    return Err(JjkError::Msg("split aborted; nothing changed".into()).into())
+                }
+            }
+        }
+        let top = self.reconstruct_layers(&mut st, &resolved, report).await?;
+        st.save(&self.root)?;
+        self.state.save(&self.root)?;
+        Ok(Some(top))
+    }
+
+    /// `jjk domain expand [--preview]` — (re)build the layer stack locally for inspection (no PRs).
+    /// `--preview` only prints the proposed split; otherwise the layer bookmarks are materialized so
+    /// they can be inspected with `jjk ll` / `jjk branch diff` before any submit.
+    pub async fn domain_expand(&mut self, preview: bool) -> Result<Report> {
+        let mut report = Report::default();
+        let Some(mut st) = ExpansionState::load(&self.root)? else {
+            return Err(JjkError::Msg(
+                "domain expansion is not active (run `jjk domain expansion` first)".into(),
+            )
+            .into());
+        };
+        self.ensure_fresh(&mut report).await?;
+        let mut resolved = self.compute_split(&st).await?;
+        expansion::match_layers(&mut resolved.plan, &st.layers, &resolved.atoms);
+        render_split_plan(&resolved, &mut report);
+        if preview {
+            report.note("(preview only — no bookmarks created; run `jjk submit` to create PRs)");
+            return Ok(report);
+        }
+        self.reconstruct_layers(&mut st, &resolved, &mut report).await?;
+        st.save(&self.root)?;
+        self.state.save(&self.root)?;
+        report.note("inspect with `jjk ll` / `jjk domain status`; `jjk submit` creates the PRs");
+        Ok(report)
+    }
+
+    /// `jjk domain explain [<layer>]` — the persisted layers with their PR-facing titles/bodies and
+    /// PR numbers. With a slug, show just that layer's full body. Read-only and cheap (no LLM call).
+    pub async fn domain_explain(&self, layer: Option<String>) -> Result<Report> {
+        let mut report = Report::default();
+        let Some(st) = ExpansionState::load(&self.root)? else {
+            report.note("domain expansion is not active (run `jjk domain expansion`)");
+            return Ok(report);
+        };
+        if st.layers.is_empty() {
+            report.note("no layers yet — run `jjk submit` or `jjk domain expand`");
+            return Ok(report);
+        }
+        for (i, l) in st.layers.iter().enumerate() {
+            if let Some(sel) = &layer {
+                if &l.slug != sel {
+                    continue;
+                }
+            }
+            let pr = self
+                .state
+                .pr_of(&l.bookmark)
+                .map(|n| format!(" → #{n}"))
+                .unwrap_or_default();
+            report.note(format!("{}. {} [{}]{pr}", i + 1, l.title, l.slug));
+            if layer.is_some() && !l.body.trim().is_empty() {
+                for line in l.body.lines() {
+                    report.note(format!("    {line}"));
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Rebase a branch's mutable chain onto the (advanced) trunk. Used by domain `sync` to shrink the
+    /// monolith's diff as bottom layers land. No-op when already based on trunk.
+    async fn rebase_branch_onto_trunk(&self, branch: &str, report: &mut Report) -> Result<()> {
+        let (trunk_revset, trunk_id) = self.trunk_anchor().await?;
+        let Some(tip) = self.resolve_bookmark(branch).await? else {
+            return Ok(());
+        };
+        let roots = self
+            .vcs
+            .resolve(&format!(
+                "roots(({trunk_revset}..{}) & mutable())",
+                tip.as_str()
+            ))
+            .await?;
+        let to_move: Vec<ChangeId> = roots
+            .into_iter()
+            .filter(|r| !r.parents.contains(&trunk_id))
+            .map(|r| r.change_id)
+            .collect();
+        if to_move.is_empty() {
+            return Ok(());
+        }
+        self.vcs.transaction(&mut |tx| {
+            for r in &to_move {
+                tx.rebase(r, &trunk_id)?;
+            }
+            Ok(())
+        })?;
+        report.note(format!("rebased '{branch}' onto trunk"));
+        Ok(())
+    }
+
+    /// `jjk sync` in domain mode: fetch + advance trunk, report any merged layer PRs, rebase the
+    /// monolith onto the new trunk (so landed work leaves its diff), then re-expand. With `push`,
+    /// submit the regenerated stack (idempotent: updates surviving PRs, drops merged layers).
+    async fn sync_domain(&mut self, push: bool) -> Result<Report> {
+        let mut report = Report::default();
+        self.ensure_fresh(&mut report).await?;
+        let remote = self.state.config.remote.clone();
+        let trunk = self.state.config.trunk.clone();
+
+        let st0 = ExpansionState::load(&self.root)?.expect("domain mode (checked by caller)");
+        let candidates: Vec<(String, u64)> = st0
+            .layers
+            .iter()
+            .filter_map(|l| self.state.pr_of(&l.bookmark).map(|pr| (l.bookmark.clone(), pr)))
+            .collect();
+
+        self.vcs.fetch(&remote, Some(&trunk)).await?;
+        report.note(format!("fetched {remote}"));
+        self.advance_trunk_to_remote(&mut report).await?;
+
+        // Report merged layer PRs (best-effort): they fall out of the diff after the monolith rebase.
+        if !candidates.is_empty() {
+            let forge = self.forge().await?;
+            let flags = futures::future::try_join_all(
+                candidates.iter().map(|(_, pr)| forge.is_merged(*pr)),
+            )
+            .await?;
+            let merged: Vec<&str> = candidates
+                .iter()
+                .zip(flags)
+                .filter(|(_, m)| *m)
+                .map(|((n, _), _)| n.as_str())
+                .collect();
+            if !merged.is_empty() {
+                report.note(format!("merged: {}", merged.join(", ")));
+            }
+        }
+
+        self.rebase_branch_onto_trunk(&st0.monolith, &mut report).await?;
+
+        if push {
+            // Re-expand and (re)submit the resulting stack in one idempotent pass.
+            return self
+                .submit_with(
+                    SubmitScope::Stack,
+                    SubmitOptions {
+                        draft: false,
+                        no_review: true,
+                    },
+                )
+                .await;
+        }
+        // Local-only: regenerate the layer stack without touching the remote.
+        self.maybe_expand_monolith(true, &mut report).await?;
+        report.note("synced local state only (--no-push)");
+        Ok(report)
+    }
+
+    /// `jjk domain collapse` — deactivate. Forgets the generated layer bookmarks locally (leaving the
+    /// monolith and its history untouched) and removes the sidecar. Remote PR branches are left as-is.
+    pub async fn domain_collapse(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        let Some(st) = ExpansionState::load(&self.root)? else {
+            report.note("domain expansion is not active");
+            return Ok(report);
+        };
+        let layer_names: Vec<String> = st.layers.iter().map(|l| l.bookmark.clone()).collect();
+        if !layer_names.is_empty() {
+            self.vcs.transaction(&mut |tx| {
+                for name in &layer_names {
+                    tx.forget_bookmark(name)?;
+                }
+                Ok(())
+            })?;
+            for name in &layer_names {
+                self.state.branches.remove(name);
+            }
+            self.state.save(&self.root)?;
+        }
+        ExpansionState::remove(&self.root)?;
+        report.note(format!(
+            "domain expansion deactivated; forgot {} layer bookmark(s)",
+            layer_names.len()
+        ));
+        report.note(format!("your work is intact on '{}'", st.monolith));
+        Ok(report)
+    }
+}
+
+/// Render a proposed split into a report (layers bottom→top, with each layer's touched files,
+/// rationale, and any backward-compat warning).
+fn render_split_plan(r: &expansion::ResolvedSplit, report: &mut Report) {
+    report.note(format!(
+        "proposed split: {} layer{} (bottom→top)",
+        r.plan.layers.len(),
+        if r.plan.layers.len() == 1 { "" } else { "s" }
+    ));
+    for (i, layer) in r.plan.layers.iter().enumerate() {
+        let warn = if layer.backward_compatible {
+            ""
+        } else {
+            " ⚠ may not be self-contained"
+        };
+        report.note(format!("  {}. {} [{}]{warn}", i + 1, layer.title, layer.slug));
+        if !layer.rationale.is_empty() {
+            report.note(format!("       why: {}", layer.rationale));
+        }
+        let mut paths: Vec<&str> = layer
+            .atoms
+            .iter()
+            .filter_map(|l| expansion::label_index(l))
+            .filter_map(|idx| r.atoms.get(idx))
+            .map(|a| a.path.as_str())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        for p in paths {
+            report.note(format!("       - {p}"));
+        }
+        if !layer.compat_notes.is_empty() {
+            report.note(format!("       compat: {}", layer.compat_notes));
+        }
+    }
+}
+
 /// Whether the remote already has `branch` at its current tip commit — i.e. a push would be a
 /// no-op. Read from the tip commit's remote bookmarks in the derived stack, so it needs no extra
 /// query: after a rewrite (rebase/amend) the tip is a new commit that no longer carries
@@ -2071,6 +2783,8 @@ pub struct SubmitOptions {
     /// Create newly-opened PRs as drafts. Pre-fills the prompt's draft default; with `AutoFill`
     /// (`--fill`/non-TTY) it is the final value. Has no effect on PRs that already exist.
     pub draft: bool,
+    /// Domain expansion: skip the interactive split-review gate (accept the proposed split).
+    pub no_review: bool,
 }
 
 /// Which branches `submit` operates on, relative to the current branch.

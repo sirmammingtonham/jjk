@@ -132,6 +132,48 @@ pub enum PrState {
     Closed,
 }
 
+/// How a file changed across a diff (`jj diff --git`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    /// Binary / mode-only change — has no textual hunks, so it can't be sub-split.
+    Binary,
+}
+
+/// One line inside a unified-diff hunk (the leading +/-/space stripped).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiffLine {
+    Context(String),
+    Added(String),
+    Removed(String),
+}
+
+/// One unified-diff hunk: a contiguous edit region with its original/new line ranges.
+/// Hunks within a single squashed diff are non-overlapping, so applying any subset onto the
+/// original (`from`) file is conflict-free — the basis of domain-expansion reconstruction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hunk {
+    pub old_start: u32,
+    pub old_len: u32,
+    pub new_start: u32,
+    pub new_len: u32,
+    pub lines: Vec<DiffLine>,
+}
+
+/// The structured diff for one file between two trees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileDiff {
+    /// New (post-image) path.
+    pub path: String,
+    /// Source path for a rename/copy, else `None`.
+    pub old_path: Option<String>,
+    pub change: FileChangeKind,
+    pub hunks: Vec<Hunk>,
+}
+
 impl fmt::Display for PrState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {

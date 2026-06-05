@@ -14,6 +14,7 @@ pub mod cli;
 pub mod engine;
 pub mod error;
 pub mod forge;
+pub mod llm;
 pub mod model;
 pub mod prompt;
 pub mod render;

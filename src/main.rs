@@ -4,11 +4,12 @@
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
 use jjk::cli::{
-    BranchCmd, Cli, Command, DownstackCmd, PrCmd, RepoCmd, StashAction, SubmitArgs, UpstackCmd,
-    WorktreeCmd,
+    BranchCmd, Cli, Command, DomainCmd, DownstackCmd, PrCmd, RepoCmd, StashAction, SubmitArgs,
+    UpstackCmd, WorktreeCmd,
 };
 use jjk::engine::{Engine, NavDir, ResumeCmd, SubmitOptions, SubmitScope};
-use jjk::prompt::{PrDraft, Prompter};
+use jjk::llm::SplitPlan;
+use jjk::prompt::{PrDraft, Prompter, SplitReview};
 use jjk::render;
 use jjk::vcs::CommitScope;
 use std::io::{BufRead, IsTerminal, Write};
@@ -54,6 +55,8 @@ fn mutates(command: &Command) -> bool {
             | Command::Branch(BranchCmd::Diff)
             | Command::Worktree(WorktreeCmd::List)
             | Command::Pr(_)
+            | Command::Domain(DomainCmd::Status)
+            | Command::Domain(DomainCmd::Explain(_))
             | Command::Undo
     )
 }
@@ -414,6 +417,25 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             render::print_report(&report);
         }
 
+        Command::Domain(DomainCmd::Expansion(args)) => {
+            let report = engine
+                .domain_activate(args.mode, args.instruction, args.verify)
+                .await?;
+            render::print_report(&report);
+        }
+        Command::Domain(DomainCmd::Status) => {
+            render::print_report(&engine.domain_status().await?);
+        }
+        Command::Domain(DomainCmd::Explain(args)) => {
+            render::print_report(&engine.domain_explain(args.layer).await?);
+        }
+        Command::Domain(DomainCmd::Expand(args)) => {
+            render::print_report(&engine.domain_expand(args.preview).await?);
+        }
+        Command::Domain(DomainCmd::Collapse) => {
+            render::print_report(&engine.domain_collapse().await?);
+        }
+
         // Handled before reaching here.
         Command::Repo(_) | Command::Add => unreachable!(),
     }
@@ -452,7 +474,10 @@ fn prepare_submit(engine: &mut Engine, args: &SubmitArgs) -> SubmitOptions {
     if interactive {
         engine.set_prompter(Box::new(TerminalPrompter));
     }
-    SubmitOptions { draft: args.draft }
+    SubmitOptions {
+        draft: args.draft,
+        no_review: args.no_review,
+    }
 }
 
 /// Terminal implementation of the `Prompter` port: git-spice-style Title → Body → Draft prompts
@@ -475,6 +500,45 @@ impl Prompter for TerminalPrompter {
         let body = prompt_body(&defaults.body)?;
         let draft = prompt_yes_no("Draft?", defaults.draft)?;
         Ok(Some(PrDraft { title, body, draft }))
+    }
+
+    fn review_split(
+        &self,
+        plan: &SplitPlan,
+        changed: &[String],
+    ) -> jjk::error::Result<SplitReview> {
+        eprintln!("\nProposed split into {} layer(s) (bottom→top):", plan.layers.len());
+        for (i, l) in plan.layers.iter().enumerate() {
+            let warn = if l.backward_compatible {
+                ""
+            } else {
+                "  ⚠ may not be self-contained"
+            };
+            let chg = if changed.contains(&l.slug) { " *changed*" } else { "" };
+            eprintln!("  {}. {} [{}]{chg}{warn}", i + 1, l.title, l.slug);
+            if !l.rationale.is_empty() {
+                eprintln!("       {}", l.rationale);
+            }
+            if !l.compat_notes.is_empty() {
+                eprintln!("       compat: {}", l.compat_notes);
+            }
+        }
+        loop {
+            let ans = prompt_line("\n[a]ccept / [e]dit / a[b]ort: ")?;
+            match ans.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+                Some("") | Some("a") | Some("accept") => return Ok(SplitReview::Accept),
+                Some("b") | Some("abort") | None => return Ok(SplitReview::Abort),
+                Some("e") | Some("edit") => {
+                    let json = serde_json::to_string_pretty(plan).unwrap_or_default();
+                    let edited = edit_in_editor(&json);
+                    match serde_json::from_str::<SplitPlan>(&edited) {
+                        Ok(p) => return Ok(SplitReview::Edit(p)),
+                        Err(e) => eprintln!("couldn't parse the edited plan ({e}); try again"),
+                    }
+                }
+                _ => eprintln!("please answer a, e, or b"),
+            }
+        }
     }
 }
 

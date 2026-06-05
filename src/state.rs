@@ -20,6 +20,9 @@ pub struct Config {
     pub vcs_backend: String,
     #[serde(default = "default_forge_backend")]
     pub forge_backend: String,
+    /// Anthropic model used by Domain Expansion's splitter. Overridable per-repo.
+    #[serde(default = "default_llm_model")]
+    pub llm_model: String,
 }
 
 fn default_forge() -> String {
@@ -30,6 +33,9 @@ fn default_vcs_backend() -> String {
 }
 fn default_forge_backend() -> String {
     "gh_cli".into()
+}
+fn default_llm_model() -> String {
+    crate::llm::anthropic::DEFAULT_MODEL.to_string()
 }
 
 /// Per-branch persisted record. Keyed by branch name; validated against the jj change id so it
@@ -72,6 +78,7 @@ impl State {
                 forge: default_forge(),
                 vcs_backend: default_vcs_backend(),
                 forge_backend: default_forge_backend(),
+                llm_model: default_llm_model(),
             },
             branches: BTreeMap::new(),
         }

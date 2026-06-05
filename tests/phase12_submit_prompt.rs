@@ -127,7 +127,13 @@ async fn draft_option_fills_through_the_default_prompter() {
 
     // No prompter installed → engine keeps its AutoFill default; --draft still applies.
     h.engine
-        .submit_with(SubmitScope::Stack, SubmitOptions { draft: true })
+        .submit_with(
+            SubmitScope::Stack,
+            SubmitOptions {
+                draft: true,
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(fake.draft_for("feat-a"), Some(true), "draft flag flows through AutoFill");
