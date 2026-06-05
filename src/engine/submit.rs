@@ -2,6 +2,7 @@
 //! stack-navigation comments. Shared helpers live in the parent `engine` module.
 
 use super::*;
+use crate::color;
 
 impl Engine {
     /// `jjk pr view` — the current branch's PR. With `print`, return its URL (don't open a browser);
@@ -153,10 +154,10 @@ impl Engine {
                         .create_pr(&item.name, &item.base, &d.title, &d.body, d.draft)
                         .await?;
                     let kind = if d.draft { "draft " } else { "" };
-                    report.note(format!(
+                    report.note(color::green(&format!(
                         "created {}#{} {} (base {})",
                         kind, pr.number, item.name, item.base
-                    ));
+                    )));
                     pr.number
                 }
             };

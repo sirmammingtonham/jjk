@@ -2,6 +2,7 @@
 //! (Domain-mode sync lives in `domain.rs`; this is the ordinary stacked-branch path.)
 
 use super::*;
+use crate::color;
 
 impl Engine {
     /// `jjk sync` — fetch trunk, reconcile merged branches, rebase the survivors, and (when `push`)
@@ -52,7 +53,7 @@ impl Engine {
         if merged_names.is_empty() {
             report.note("no merged PRs to reconcile");
         } else {
-            report.note(format!("merged: {}", merged_names.join(", ")));
+            report.note(color::yellow(&format!("merged: {}", merged_names.join(", "))));
         }
 
         // 3. Rebase the whole stack onto the (advanced) trunk. In the squash case the merged
@@ -138,7 +139,7 @@ impl Engine {
                 // commit, so this pushes; an untouched branch is skipped.
                 if !tip_on_remote(b, &remote) {
                     self.vcs.push(&remote, &b.name, PushOpts::default()).await?;
-                    report.note(format!("pushed {}", b.name));
+                    report.note(color::green(&format!("pushed {}", b.name)));
                 }
                 let base = prev_tracked.clone().unwrap_or_else(|| trunk_name.clone());
                 if let Some(pr) = b.pr {

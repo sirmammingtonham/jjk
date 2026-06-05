@@ -160,6 +160,29 @@ impl JjCli {
         Ok(())
     }
 
+    /// Raw bytes of `path` at `rev` (`jj file show`), or `Err` if the file doesn't exist there.
+    /// Returns bytes (not lossy UTF-8) so binary files reconstruct exactly. Used by domain-expansion
+    /// to place binary files in their assigned layer (they have no textual hunks to apply).
+    pub async fn file_bytes(&self, rev: &ChangeId, path: &str) -> Result<Vec<u8>> {
+        // Run *in* the workspace root: `jj file show <path>` resolves the path relative to the
+        // current directory, so without this a repo-root-relative path wouldn't be found.
+        let out = AsyncCommand::new("jj")
+            .current_dir(&self.root)
+            .arg("-R")
+            .arg(&self.root)
+            .args(["file", "show", "--ignore-working-copy", "-r", rev.as_str(), path])
+            .output()
+            .await
+            .context("failed to spawn `jj`")?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "jj file show -r {} {path} failed (file absent?)",
+                rev.as_str()
+            ));
+        }
+        Ok(out.stdout)
+    }
+
     /// Run a `jj` command that needs the terminal (interactive editors); inherits stdio.
     fn run_interactive(&self, args: &[&str]) -> Result<()> {
         let status = Command::new("jj")

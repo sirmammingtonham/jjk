@@ -2,6 +2,7 @@
 //! the split pipeline (compute/hierarchical), scratch-workspace reconstruction, the review-gated
 //! (re)expansion, and domain-aware sync. The `Engine` struct + shared helpers live in the parent.
 
+use crate::color;
 use crate::engine::expansion::{self, ExpansionState, Materialized, Mode, PersistedLayer};
 use crate::error::{JjkError, Result};
 use crate::model::{ChangeId, FileChangeKind};
@@ -31,7 +32,7 @@ struct Pending {
 impl Engine {
     /// `jjk domain expansion` — activate auto-stacking on the current branch (the monolith). Records
     /// mode/instruction/verify in the sidecar; the actual split happens on the next `submit`/`sync`
-    /// (or `domain rebuild`).
+    /// (or `domain split`).
     pub async fn domain_activate(
         &mut self,
         mode: Mode,
@@ -56,12 +57,14 @@ impl Engine {
             st.thinking = effort;
         }
         st.save(&self.root)?;
-        report.note(format!("domain expansion active on '{branch}' (mode: {mode})"));
+        report.note(color::bold_green(&format!(
+            "domain expansion active on '{branch}' (mode: {mode})"
+        )));
         if let Some(m) = &st.model {
-            report.note(format!("model: {m}"));
+            report.note(color::dim(&format!("model: {m}")));
         }
         if let Some(t) = &st.thinking {
-            report.note(format!("effort: {t}"));
+            report.note(color::dim(&format!("effort: {t}")));
         }
         report.note("run `jjk submit` to split it into a reviewable stack");
         Ok(report)
@@ -74,27 +77,40 @@ impl Engine {
             report.note("domain expansion is not active (run `jjk domain expansion`)");
             return Ok(report);
         };
-        report.note(format!("monolith: {} (mode: {})", st.monolith, st.mode));
+        report.note(format!(
+            "monolith: {} (mode: {})",
+            color::cyan(&st.monolith),
+            st.mode
+        ));
         if let Some(instr) = &st.instruction {
-            report.note(format!("instruction: {instr}"));
+            report.note(color::dim(&format!("instruction: {instr}")));
         }
         if let Some(v) = &st.verify_cmd {
-            report.note(format!("verify: {v}"));
+            report.note(color::dim(&format!("verify: {v}")));
         }
         if st.layers.is_empty() {
-            report.note("no layers yet — run `jjk submit` or `jjk domain rebuild`");
+            report.note("no layers yet — run `jjk submit` or `jjk domain split`");
         } else {
             report.note(format!("{} layer(s) (bottom→top):", st.layers.len()));
             for (i, l) in st.layers.iter().enumerate() {
                 let pr = self
                     .state
                     .pr_of(&l.bookmark)
-                    .map(|n| format!(" → #{n}"))
+                    .map(|n| color::green(&format!(" → #{n}")))
                     .unwrap_or_default();
-                let warn = if l.backward_compatible { "" } else { " ⚠" };
-                report.note(format!("  {}. {} [{}]{pr}{warn}", i + 1, l.title, l.slug));
+                let warn = if l.backward_compatible {
+                    String::new()
+                } else {
+                    color::yellow(" ⚠")
+                };
+                report.note(format!(
+                    "  {}. {} {}{pr}{warn}",
+                    i + 1,
+                    color::bold(&l.title),
+                    color::dim(&format!("[{}]", l.slug)),
+                ));
                 if !l.backward_compatible && !l.compat_notes.is_empty() {
-                    report.note(format!("       ⚠ {}", l.compat_notes));
+                    report.note(color::yellow(&format!("       ⚠ {}", l.compat_notes)));
                 }
             }
         }
@@ -317,7 +333,15 @@ impl Engine {
                 Ok(())
             })?;
             let id = new_id.expect("new_child returns an id");
-            materialize_layer(scratch_dir, &resolved.files, &base, &included)?;
+            materialize_layer(
+                scratch,
+                scratch_dir,
+                &resolved.monolith_tip,
+                &resolved.files,
+                &base,
+                &included,
+            )
+            .await?;
             scratch.snapshot().await?;
 
             // Verify (if configured) while this tree is `@`; fold non-last failures forward.
@@ -355,7 +379,7 @@ impl Engine {
                 } else {
                     p.rationale.clone()
                 };
-                let bookmark = ExpansionState::layer_bookmark(&p.slug);
+                let bookmark = ExpansionState::layer_bookmark(&st.monolith, &p.slug);
                 let msg = if p.body.trim().is_empty() {
                     title.clone()
                 } else {
@@ -410,7 +434,7 @@ impl Engine {
             let id = rem_id.expect("new_child returns an id");
             scratch.restore_all_from(&resolved.monolith_tip).await?;
             scratch.snapshot().await?;
-            let bm = ExpansionState::layer_bookmark("remainder");
+            let bm = ExpansionState::layer_bookmark(&st.monolith, "remainder");
             let bmc = bm.clone();
             scratch.transaction(&mut |tx| {
                 tx.describe(&id, "Remaining changes\n\nResidual not captured by earlier layers.")?;
@@ -552,10 +576,10 @@ impl Engine {
         Ok(Some(top))
     }
 
-    /// `jjk domain rebuild [--preview]` — (re)build the layer stack locally for inspection (no PRs).
+    /// `jjk domain split [--preview]` — (re)build the layer stack locally for inspection (no PRs).
     /// `--preview` only prints the proposed split; otherwise the layer bookmarks are materialized so
     /// they can be inspected with `jjk ll` / `jjk branch diff` before any submit.
-    pub async fn domain_rebuild(&mut self, preview: bool) -> Result<Report> {
+    pub async fn domain_split(&mut self, preview: bool) -> Result<Report> {
         let mut report = Report::default();
         let Some(mut st) = ExpansionState::load(&self.root)? else {
             return Err(JjkError::Msg(
@@ -587,7 +611,7 @@ impl Engine {
             return Ok(report);
         };
         if st.layers.is_empty() {
-            report.note("no layers yet — run `jjk submit` or `jjk domain rebuild`");
+            report.note("no layers yet — run `jjk submit` or `jjk domain split`");
             return Ok(report);
         }
         for (i, l) in st.layers.iter().enumerate() {
@@ -599,20 +623,29 @@ impl Engine {
             let pr = self
                 .state
                 .pr_of(&l.bookmark)
-                .map(|n| format!(" → #{n}"))
+                .map(|n| color::green(&format!(" → #{n}")))
                 .unwrap_or_default();
-            let warn = if l.backward_compatible { "" } else { " ⚠ may not be self-contained" };
-            report.note(format!("{}. {} [{}]{pr}{warn}", i + 1, l.title, l.slug));
+            let warn = if l.backward_compatible {
+                String::new()
+            } else {
+                color::yellow(" ⚠ may not be self-contained")
+            };
+            report.note(format!(
+                "{}. {} {}{pr}{warn}",
+                i + 1,
+                color::bold(&l.title),
+                color::dim(&format!("[{}]", l.slug)),
+            ));
             if !l.rationale.is_empty() {
-                report.note(format!("    why: {}", l.rationale));
+                report.note(color::dim(&format!("    why: {}", l.rationale)));
             }
             if !l.compat_notes.is_empty() {
-                report.note(format!("    compat: {}", l.compat_notes));
+                report.note(color::yellow(&format!("    compat: {}", l.compat_notes)));
             }
             if layer.is_some() && !l.body.trim().is_empty() {
-                report.note("    ---");
+                report.note(color::dim("    ---"));
                 for line in l.body.lines() {
-                    report.note(format!("    {line}"));
+                    report.note(color::dim(&format!("    {line}")));
                 }
             }
         }
@@ -755,20 +788,25 @@ impl Engine {
 /// Render a proposed split into a report (layers bottom→top, with each layer's touched files,
 /// rationale, and any backward-compat warning).
 fn render_split_plan(r: &expansion::ResolvedSplit, report: &mut Report) {
-    report.note(format!(
+    report.note(color::bold(&format!(
         "proposed split: {} layer{} (bottom→top)",
         r.plan.layers.len(),
         if r.plan.layers.len() == 1 { "" } else { "s" }
-    ));
+    )));
     for (i, layer) in r.plan.layers.iter().enumerate() {
         let warn = if layer.backward_compatible {
-            ""
+            String::new()
         } else {
-            " ⚠ may not be self-contained"
+            color::yellow(" ⚠ may not be self-contained")
         };
-        report.note(format!("  {}. {} [{}]{warn}", i + 1, layer.title, layer.slug));
+        report.note(format!(
+            "  {}. {} {}{warn}",
+            i + 1,
+            color::bold(&layer.title),
+            color::dim(&format!("[{}]", layer.slug)),
+        ));
         if !layer.rationale.is_empty() {
-            report.note(format!("       why: {}", layer.rationale));
+            report.note(color::dim(&format!("       why: {}", layer.rationale)));
         }
         let mut paths: Vec<&str> = layer
             .atoms
@@ -780,10 +818,10 @@ fn render_split_plan(r: &expansion::ResolvedSplit, report: &mut Report) {
         paths.sort();
         paths.dedup();
         for p in paths {
-            report.note(format!("       - {p}"));
+            report.note(color::dim(&format!("       - {p}")));
         }
         if !layer.compat_notes.is_empty() {
-            report.note(format!("       compat: {}", layer.compat_notes));
+            report.note(color::yellow(&format!("       compat: {}", layer.compat_notes)));
         }
     }
 }
@@ -791,8 +829,10 @@ fn render_split_plan(r: &expansion::ResolvedSplit, report: &mut Report) {
 /// Write the cumulative content of every touched file (per `included` hunk indices) into the scratch
 /// working copy, applying the patch subset onto each file's trunk `base`. Deletions remove the file;
 /// binary files are skipped (the remainder commit captures them).
-fn materialize_layer(
+async fn materialize_layer(
+    scratch: &crate::vcs::jj_cli::JjCli,
     scratch_dir: &Path,
+    monolith_tip: &ChangeId,
     files: &[crate::model::FileDiff],
     base: &std::collections::HashMap<String, String>,
     included: &std::collections::HashMap<usize, Vec<usize>>,
@@ -800,6 +840,24 @@ fn materialize_layer(
     use std::fs;
     for (&fi, hidxs) in included {
         let f = &files[fi];
+        // Binary files have no textual hunks to apply: reconstruct them from the monolith's exact
+        // bytes (or remove if they were deleted there). This lets a binary file live in whatever
+        // layer the splitter assigned it to, not just the remainder.
+        if f.change == FileChangeKind::Binary {
+            let abs = scratch_dir.join(&f.path);
+            match scratch.file_bytes(monolith_tip, &f.path).await {
+                Ok(bytes) => {
+                    if let Some(dir) = abs.parent() {
+                        fs::create_dir_all(dir)?;
+                    }
+                    fs::write(&abs, bytes)?;
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&abs);
+                }
+            }
+            continue;
+        }
         let base_content = match f.change {
             FileChangeKind::Added => None,
             FileChangeKind::Renamed => f.old_path.as_deref().and_then(|p| base.get(p)),

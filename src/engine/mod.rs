@@ -33,7 +33,7 @@ const MAX_CHECKPOINTS: usize = 100;
 /// Above this many change-atoms, domain expansion splits hierarchically (bucket the atoms into
 /// dependency-component groups and split each separately) so no single LLM call carries the whole
 /// catalog. Sized to keep a single split prompt comfortably small.
-const HIERARCHICAL_THRESHOLD: usize = 60;
+const HIERARCHICAL_THRESHOLD: usize = 200;
 
 /// A single undo point: the jj operation to restore to, plus a snapshot of jjk's state.toml so the
 /// two stay in sync. Stored as a stack in `.jj/jjk/undo.json`.

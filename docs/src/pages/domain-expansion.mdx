@@ -24,13 +24,15 @@ The difference is who draws the boundaries.
 
 ## When to use which
 
-| | Manual | Domain Expansion |
-| --- | --- | --- |
-| You think in branches as you work | ✅ | |
-| You'd rather just code, then split afterward | | ✅ |
-| You want exact control over each PR's contents | ✅ | ✅ *(review/edit the split)* |
-| Addressing review means editing **one branch**, not juggling the stack | | ✅ |
-| Works offline / no API key | ✅ | ⚠️ *(degraded — see [No API key](#no-api-key))* |
+Reach for **manual** stacking when you naturally think in branches as you work, or you want to
+hand-author each PR's exact contents.
+
+Reach for **Domain Expansion** when you'd rather write the code first and split it into reviewable
+PRs afterward, or when you want to address review by editing a single branch instead of juggling the
+stack.
+
+Either way you review the result before it ships, and both produce the same correctly-based stacked
+PRs with a navigation comment.
 
 ## How it feels
 
@@ -52,8 +54,9 @@ jjk submit
 jjk sync                             # re-splits; existing PRs stay put
 ```
 
-You stay on `my-feature` the whole time. The generated branches (`jjk/layer/*`) are an implementation
-detail you can inspect but never have to touch.
+You stay on `my-feature` the whole time. The generated branches reuse your branch's prefix — an
+`ethan/monolith` monolith produces `ethan/<slug>` branches (a prefix-less branch falls back to
+`jjk/layer/<slug>`). They're an implementation detail you can inspect but never have to touch.
 
 ## Activating
 
@@ -66,7 +69,7 @@ jjk domain expansion [--mode feature|change|slice]
 ```
 
 This records the current branch as the **monolith** (in `.jj/jjk/expansion.json`). No split happens
-yet — the actual decomposition runs on your next `submit` or `sync` (or `domain rebuild`).
+yet — the actual decomposition runs on your next `submit` or `sync` (or `domain split`).
 
 ### Modes
 
@@ -88,7 +91,7 @@ The splitter operates on what's **committed** to the monolith branch — it diff
 Uncommitted edits live in your working copy *above* the branch tip, so they are **not** included in
 the split.
 
-So before `submit`/`sync`/`rebuild`, finalize your work with **`jjk commit`** (which advances the
+So before `submit`/`sync`/`split`, finalize your work with **`jjk commit`** (which advances the
 monolith branch to your committed work). A plain `git commit` also works in the colocated repo, but
 `jjk commit` is the clean path and lets `git add` scope a commit.
 
@@ -112,7 +115,7 @@ Proposed split into 3 layer(s) (bottom→top):
 
 - **accept** — build the stack and open the PRs.
 - **edit** — open the plan in `$EDITOR` (JSON: which atoms go in which layer, titles, ordering),
-  tweak it, and jjk rebuilds from your edited plan.
+  tweak it, and jjk builds the stack from your edited plan.
 - **abort** — cancel; nothing is created.
 
 Skip the gate with `--no-review` (alias `-y`):
@@ -147,8 +150,8 @@ Everything is verifiable locally; you never have to trust the split blindly.
 jjk domain status              # the monolith ↔ layers map, PR numbers, ⚠ compat flags
 jjk domain explain             # each layer's rationale + any compat notes
 jjk domain explain auth-module # one layer, with its full PR body
-jjk domain rebuild              # (re)build the layer branches locally — no PRs
-jjk domain rebuild --preview    # just print the proposed split, build nothing
+jjk domain split              # (re)build the layer branches locally — no PRs
+jjk domain split --preview    # just print the proposed split, build nothing
 jjk ll                         # the generated stack as a tree
 jjk branch diff                # diff a layer against its base
 ```
@@ -172,9 +175,11 @@ jjk domain expansion --verify "cargo build"
 ## No changes are ever lost
 
 The reconstructed stack's top is always verified to be **tree-identical to your monolith**
-(`trees_equal`). If anything didn't fit the textual split (e.g. a binary file), jjk appends a
-catch-all *remainder* layer so the invariant always holds. If it somehow couldn't, expansion aborts
-rather than risk dropping work.
+(`trees_equal`). Binary files — which have no textual diff to apply — are reconstructed byte-for-byte
+from the monolith in whichever layer the splitter assigned them, so they're first-class members of
+the stack, not special-cased. In the rare case something still doesn't reconcile, jjk appends a
+catch-all *remainder* layer at the top so the invariant always holds; if even that fails, expansion
+aborts rather than risk dropping work.
 
 ## Model & effort
 
@@ -184,8 +189,9 @@ plus dependency hints), and pulls full diffs for specific atoms only when it nee
 Model and thinking effort **adapt to the changeset size** and are easy to override when a tough split
 wants more horsepower:
 
-- **Model** — `auto` tiers between Haiku (small) and Sonnet (larger); or pin `opus`/`sonnet`/`haiku`
-  (or a full model id).
+- **Model** — `auto` uses **Sonnet** by default, drops to **Haiku** only for very small, simple
+  changesets, and steps up to **Opus** once a changeset gets large (even a big split is only a few
+  thousand tokens, so it's cheap insurance). Or pin `opus`/`sonnet`/`haiku` (or a full model id).
 - **Effort** — `auto` scales the thinking budget with complexity; or `off`/`low`/`high`/`max`/a token
   count.
 
@@ -226,25 +232,29 @@ snapshotted alongside jj's, so they never drift).
 
 For the curious — you don't need any of this to use it:
 
-1. **Atomize.** `trunk..monolith` is parsed into change-*atoms* (a hunk, or a whole add/delete/rename),
-   each with a stable content hash.
+1. **Atomize.** `trunk..monolith` is parsed into change-*atoms* (one per *hunk* for a modified file,
+   or a whole add/delete/rename/binary), each with a stable content hash. Because a modified file is
+   per-hunk, **the same file's changes can be split across different layers** — the patch-subset
+   applier reconstructs each layer's version of the file — as long as the hunks are independent.
 2. **Sketch.** A dependency graph (def→use, co-change, same-file) annotates the atoms. This is
    *advisory* — it makes the LLM's job cheap and well-informed; it does not pre-decide the split.
 3. **Split.** The LLM groups atoms into ordered layers and names them. The engine validates only that
    every atom is placed exactly once (strays go to the remainder) — it never re-clusters.
-4. **Reconstruct.** Layers are built as a `jjk/layer/*` chain off trunk in an isolated scratch jj
-   workspace (your working copy is never touched), applying each layer's hunks onto trunk.
+4. **Reconstruct.** Layers are built as a chain of branches (named after the monolith's prefix) off
+   trunk in an isolated scratch jj workspace (your working copy is never touched), applying each
+   layer's hunks onto trunk and copying binary files byte-for-byte.
 5. **Verify & submit.** `trees_equal(top, monolith)` gates the result; then the existing submit/sync
    machinery opens the PRs, nav comments, and retargets — the layers are just ordinary tracked
    branches.
 
-For very large changesets, jjk splits **hierarchically** — it buckets independent components and
-splits each separately — so no single LLM call carries the whole catalog.
+Only a **very** large changeset triggers this — past ~200 change-atoms (i.e. hundreds of hunks).
+Below that the whole changeset goes to the model in a single holistic call; an atom is a one-line
+gist, so even a couple hundred of them is a few thousand tokens. When it does kick in, jjk buckets
+independent components and splits each separately, so no single call carries the whole catalog.
 
 ## Limitations
 
 - **Experimental**, and the split is non-deterministic — always review (or `--verify`).
-- **Binary files** can't be reconstructed from a textual diff, so they land in the remainder layer.
 - **`upstack`/`downstack`/`branch submit`** scopes aren't meaningful in Domain Expansion (you're on
   the monolith, not a layer) — use `jjk submit`.
 - A monolith with **conflicts** (e.g. after a conflicting trunk advance during `sync`) must be

@@ -13,6 +13,12 @@ description: Familiar git commands and a stacking workflow over Jujutsu (jj) for
 model. jj quietly does the hard parts: automatic rebasing, first-class conflicts, stable change
 identity, and instant undo.
 
+And if you'd rather not curate a stack by hand at all, **[Domain Expansion](/domain-expansion)** lets
+you work on a single branch and have an LLM split it into a clean, ordered stack of small, reviewable
+PRs — drawing the boundaries, ordering them, and writing each title and description. You review the
+proposed split, then ship; address feedback on that one branch and re-sync, and the stack regenerates
+with your PRs intact.
+
 ## The problem
 
 Stacking PRs is the right way to ship large changes as small, reviewable pieces. But with git-based

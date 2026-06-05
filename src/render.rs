@@ -2,12 +2,11 @@
 
 use crate::engine::stack::{Branch, Stack};
 use crate::engine::{Report, WorktreeRow};
-use std::io::IsTerminal;
 
-// ---- minimal ANSI styling (disabled when stdout isn't a terminal) ----
+// ---- minimal ANSI styling (disabled when stdout isn't a terminal; see crate::color) ----
 
 fn colors_on() -> bool {
-    std::io::stdout().is_terminal()
+    crate::color::enabled()
 }
 
 fn paint(on: bool, code: &str, s: &str) -> String {

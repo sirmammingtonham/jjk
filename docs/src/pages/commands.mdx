@@ -90,7 +90,7 @@ Work on one branch and let an LLM split it into a stack. See the
 | `jjk domain expansion` | Activate auto-stacking on the current branch (the *monolith*). Flags: `--mode feature\|change\|slice` (default `change`), `--instruction "<text>"`, `--verify "<cmd>"` (per-layer build gate), `--model <auto\|opus\|sonnet\|haiku\|id>`, `--effort <auto\|off\|low\|high\|max\|N>`. Records the mode; the split runs on the next `submit`/`sync`/`expand`. |
 | `jjk domain status` | Read-only: the monolith ↔ layers map, PR numbers, and ⚠ flags for layers the splitter judged risky. |
 | `jjk domain explain [<layer>]` | Read-only: each layer's grouping rationale and compat notes; with a slug, also its full PR body. |
-| `jjk domain rebuild [--preview]` | (Re)build the layer branches locally for inspection — no PRs. `--preview` just prints the proposed split. |
+| `jjk domain split [--preview]` | Split the monolith into the layer branches locally for inspection — no PRs (split without submitting). `--preview` just prints the proposed split. |
 | `jjk domain collapse` | Deactivate: forget the `jjk/layer/*` branches; the monolith is untouched. |
 | `jjk submit --no-review` / `-y` | In Domain Expansion mode, accept the proposed split without the interactive review gate. |
 

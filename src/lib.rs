@@ -11,6 +11,7 @@
 //! - [`cli`]     clap vocabulary
 
 pub mod cli;
+pub mod color;
 pub mod engine;
 pub mod error;
 pub mod forge;

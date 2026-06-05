@@ -152,12 +152,15 @@ impl ExpansionState {
         }
     }
 
-    /// Reserved bookmark namespace for generated layers.
-    pub const LAYER_PREFIX: &'static str = "jjk/layer/";
-
-    /// The bookmark name for a layer slug.
-    pub fn layer_bookmark(slug: &str) -> String {
-        format!("{}{slug}", Self::LAYER_PREFIX)
+    /// Bookmark name for a generated layer. Reuses the monolith's prefix so the stack reads as a
+    /// family — `ethan/monolith` → `ethan/<slug>`. A monolith with no prefix (e.g. `feature`) falls
+    /// back to the reserved `jjk/layer/` namespace (a `feature/<slug>` ref would D/F-conflict with
+    /// the `feature` ref in colocated git).
+    pub fn layer_bookmark(monolith: &str, slug: &str) -> String {
+        match monolith.rsplit_once('/') {
+            Some((prefix, _)) if !prefix.is_empty() => format!("{prefix}/{slug}"),
+            _ => format!("jjk/layer/{slug}"),
+        }
     }
 }
 

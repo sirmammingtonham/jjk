@@ -16,11 +16,18 @@ use serde_json::{json, Value};
 /// How many tool round-trips to allow (detail fetches + the final record_split).
 const MAX_ITERS: usize = 6;
 
-// Model ids (latest families). `auto` tiers between haiku and sonnet; override to any id or the
-// `opus`/`sonnet`/`haiku` shorthands for a stronger split.
+// Model ids (latest families). `auto` defaults to Sonnet, drops to Haiku only for tiny changesets,
+// and escalates to Opus once a changeset gets large; override to any id or the
+// `opus`/`sonnet`/`haiku` shorthands to pin one.
 pub const HAIKU: &str = "claude-haiku-4-5-20251001";
 pub const SONNET: &str = "claude-sonnet-4-6";
 pub const OPUS: &str = "claude-opus-4-8";
+
+// Auto-tier breakpoints (atom = one hunk gist). Haiku is reserved for very small, simple
+// changesets; Sonnet is the everyday default; Opus takes over once a changeset gets large — a
+// few-thousand-token Opus split costs cents, so reaching for it is cheap insurance on a big diff.
+const HAIKU_MAX_ATOMS: usize = 10;
+const OPUS_MIN_ATOMS: usize = 100;
 
 /// Default `llm_model` config value: tier automatically by changeset size.
 pub const DEFAULT_MODEL: &str = "auto";
@@ -45,12 +52,14 @@ impl ModelChoice {
         }
     }
 
-    /// Resolve to a concrete model id for a given atom count. Hierarchical split bounds bucket size,
-    /// so a single call stays modest; small splits go to the fast tier.
+    /// Resolve to a concrete model id for a given atom count: Haiku for tiny changesets, Sonnet by
+    /// default, Opus once it's large. Hierarchical split bounds bucket size, so any single call
+    /// stays well within Opus's comfortable range.
     fn resolve(&self, atoms: usize) -> String {
         match self {
             ModelChoice::Fixed(m) => m.clone(),
-            ModelChoice::Auto if atoms <= 20 => HAIKU.to_string(),
+            ModelChoice::Auto if atoms <= HAIKU_MAX_ATOMS => HAIKU.to_string(),
+            ModelChoice::Auto if atoms >= OPUS_MIN_ATOMS => OPUS.to_string(),
             ModelChoice::Auto => SONNET.to_string(),
         }
     }
@@ -368,9 +377,14 @@ mod tests {
         assert!(matches!(ModelChoice::parse(""), ModelChoice::Auto));
         assert_eq!(ModelChoice::parse("opus").resolve(5), OPUS);
         assert_eq!(ModelChoice::parse("claude-x").resolve(999), "claude-x");
-        // auto tiers by size
+        // auto tiers by size: Haiku for tiny, Sonnet by default, Opus once it's large.
         assert_eq!(ModelChoice::Auto.resolve(5), HAIKU);
-        assert_eq!(ModelChoice::Auto.resolve(40), SONNET);
+        assert_eq!(ModelChoice::Auto.resolve(HAIKU_MAX_ATOMS), HAIKU);
+        assert_eq!(ModelChoice::Auto.resolve(HAIKU_MAX_ATOMS + 1), SONNET);
+        assert_eq!(ModelChoice::Auto.resolve(25), SONNET);
+        assert_eq!(ModelChoice::Auto.resolve(OPUS_MIN_ATOMS - 1), SONNET);
+        assert_eq!(ModelChoice::Auto.resolve(OPUS_MIN_ATOMS), OPUS);
+        assert_eq!(ModelChoice::Auto.resolve(120), OPUS);
     }
 
     #[test]

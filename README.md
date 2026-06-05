@@ -8,6 +8,12 @@
 model. jj does the hard parts: automatic rebasing, first-class conflicts, stable change identity, and
 instant undo.
 
+**Or skip managing branches entirely.** With **Domain Expansion**, you do all your work on one
+branch and let an LLM carve it into a clean, ordered stack of small, reviewable PRs for you —
+boundaries, ordering, titles, and descriptions included. You review the proposed split (and can edit
+it), then ship. Feedback? Edit the one branch and re-sync; the stack regenerates and your PRs stay
+put. See [Two ways to stack](#two-ways-to-stack).
+
 ![](https://i.imgflip.com/at3gj0.jpg)
 
 📖 **[Documentation](https://ethan.website/jjk/)**
@@ -24,6 +30,9 @@ main
 ## Features
 
 - **Familiar commands.** `commit`, `branch create`, `checkout`, `submit`, `sync`. No new VCS to learn.
+- **Domain Expansion** *(experimental)*: don't carve the stack by hand — work on one branch and let
+  an LLM split it into an ordered stack of small, reviewable PRs. See
+  [Two ways to stack](#two-ways-to-stack).
 - **Stacked PRs on GitHub**, each correctly based on the one below it, with an auto-updated stack
   navigation comment.
 - **Mid-stack edits auto-restack the upstack.** No manual restack step and no replaying conflicts in
@@ -33,8 +42,6 @@ main
 - **Conflicts never stop the world.** They live inside commits; you resolve once and the fix
   propagates upstack.
 - **Parallel worktrees** for working several branches at once, and `jjk undo` for anything.
-- **Domain Expansion** (experimental): work on a single branch and let an LLM split it into a
-  reviewable stack of PRs — see [Two ways to stack](#two-ways-to-stack).
 
 ## Two ways to stack
 

@@ -109,7 +109,7 @@ async fn preview_covers_every_changed_file() {
     // Force the offline splitter so the test never reaches the network.
     e.set_splitter(Box::new(FakeSplitter::deterministic()));
 
-    let report = e.domain_rebuild(/*preview=*/ true).await.unwrap();
+    let report = e.domain_split(/*preview=*/ true).await.unwrap();
     let text = report.notes.join("\n");
 
     assert!(text.contains("proposed split"), "got:\n{text}");
@@ -141,7 +141,7 @@ async fn engine_respects_the_splitter_grouping_without_reclustering() {
     };
     e.set_splitter(Box::new(FakeSplitter::scripted(plan)));
 
-    let report = e.domain_rebuild(true).await.unwrap();
+    let report = e.domain_split(true).await.unwrap();
     let text = report.notes.join("\n");
     assert!(text.contains("1 layer (bottom→top)"), "got:\n{text}");
     assert!(text.contains("All the work"));
@@ -185,7 +185,7 @@ async fn reconstruct_builds_a_tree_equivalent_stack() {
         ],
     };
     e.set_splitter(Box::new(FakeSplitter::scripted(plan)));
-    e.domain_rebuild(/*preview=*/ false).await.unwrap();
+    e.domain_split(/*preview=*/ false).await.unwrap();
 
     // Two layer bookmarks exist.
     let bms = e.vcs().bookmarks().await.unwrap();
@@ -447,15 +447,15 @@ async fn hierarchical_split_for_large_changesets() {
     let (tmp, mut e) = setup().await;
     let root = tmp.path().to_path_buf();
     e.branch_create("feature", true).await.unwrap();
-    // 70 independent files → 70 atoms, over the 60-atom threshold → two buckets.
-    for i in 0..70 {
+    // 201 independent files → 201 atoms, over the 200-atom threshold → two buckets (≤200 each).
+    for i in 0..201 {
         write(&root, &format!("f{i}.rs"), &format!("fn f{i}() {{}}\n"));
     }
     e.commit("feature: big change").await.unwrap();
     e.domain_activate(Mode::Change, None, None, None, None).await.unwrap();
     e.set_splitter(Box::new(OneLayerSplitter));
 
-    e.domain_rebuild(/*preview=*/ false).await.unwrap();
+    e.domain_split(/*preview=*/ false).await.unwrap();
 
     let st = ExpansionState::load(&root).unwrap().unwrap();
     assert_eq!(st.layers.len(), 2, "two buckets → two layers (one per bucket)");
@@ -482,7 +482,7 @@ async fn verify_passing_keeps_all_layers() {
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
     })));
-    let report = e.domain_rebuild(false).await.unwrap().notes.join("\n");
+    let report = e.domain_split(false).await.unwrap().notes.join("\n");
     assert!(report.contains("verified all layers"), "got:\n{report}");
     let st = ExpansionState::load(&root).unwrap().unwrap();
     assert_eq!(st.layers.len(), 2, "both layers kept when each builds");
@@ -499,7 +499,7 @@ async fn verify_failure_folds_layers_forward() {
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
     })));
-    let report = e.domain_rebuild(false).await.unwrap().notes.join("\n");
+    let report = e.domain_split(false).await.unwrap().notes.join("\n");
     assert!(report.contains("merging into the next layer"), "got:\n{report}");
 
     // The failing bottom layer is folded into the last → a single sealed layer covering everything.
@@ -551,7 +551,7 @@ async fn status_and_explain_surface_compat_and_rationale() {
         }],
     };
     e.set_splitter(Box::new(FakeSplitter::scripted(plan)));
-    e.domain_rebuild(false).await.unwrap();
+    e.domain_split(false).await.unwrap();
 
     let status = e.domain_status().await.unwrap().notes.join("\n");
     assert!(status.contains('⚠'), "status flags the risky layer: {status}");
@@ -571,4 +571,105 @@ async fn model_and_effort_persist_for_the_monolith() {
     let st = ExpansionState::load(tmp.path()).unwrap().unwrap();
     assert_eq!(st.model.as_deref(), Some("opus"));
     assert_eq!(st.thinking.as_deref(), Some("max"));
+}
+
+#[tokio::test]
+async fn layer_branches_follow_the_monolith_prefix() {
+    let (tmp, mut e) = setup().await;
+    let root = tmp.path().to_path_buf();
+    // A monolith with a `user/` prefix → layers reuse that prefix, not the jjk/layer/ namespace.
+    e.branch_create("ethan/monolith", true).await.unwrap();
+    write(&root, "a.rs", "fn a() {}\n");
+    write(&root, "b.rs", "fn b() {}\n");
+    e.commit("ethan/monolith: work").await.unwrap();
+    e.domain_activate(Mode::Change, None, None, None, None)
+        .await
+        .unwrap();
+    e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
+        layers: vec![layer("base", &["a0"], "Base"), layer("top", &["a1"], "Top")],
+    })));
+    e.domain_split(false).await.unwrap();
+
+    let bms = e.vcs().bookmarks().await.unwrap();
+    assert!(bms.iter().any(|b| b.name == "ethan/base"), "got: {bms:?}");
+    assert!(bms.iter().any(|b| b.name == "ethan/top"));
+    assert!(
+        !bms.iter().any(|b| b.name.starts_with("jjk/layer/")),
+        "prefixed monolith should not use the jjk/layer/ fallback"
+    );
+}
+
+#[tokio::test]
+async fn same_file_can_split_across_layers() {
+    let (tmp, mut e) = setup().await;
+    let root = tmp.path().to_path_buf();
+    // Seed a 20-line file on trunk, then edit the first and last lines on the monolith. They're far
+    // enough apart (> the diff's hunk-merge window) to produce two separate hunks → two atoms.
+    let lines: Vec<String> = (1..=20).map(|n| format!("line{n}")).collect();
+    write(&root, "shared.rs", &format!("{}\n", lines.join("\n")));
+    e.vcs()
+        .transaction(&mut |tx| {
+            let id = tx.finalize_working_copy("seed trunk")?;
+            tx.create_bookmark("main", &id)?;
+            Ok(())
+        })
+        .unwrap();
+    e.branch_create("feature", true).await.unwrap();
+    let mut edited = lines.clone();
+    edited[0] = "LINE1".into();
+    edited[19] = "LINE20".into();
+    write(&root, "shared.rs", &format!("{}\n", edited.join("\n")));
+    e.commit("feature: edit two regions").await.unwrap();
+    e.domain_activate(Mode::Change, None, None, None, None)
+        .await
+        .unwrap();
+    // Put each hunk of the same file in a different layer.
+    e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
+        layers: vec![layer("first", &["a0"], "First edit"), layer("second", &["a1"], "Second edit")],
+    })));
+    e.domain_split(false).await.unwrap();
+
+    let st = ExpansionState::load(&root).unwrap().unwrap();
+    assert_eq!(st.layers.len(), 2, "no remainder — the file split cleanly across two layers");
+    let monolith_tip = resolve_tip(&e, "feature").await;
+    let top = resolve_tip(&e, "jjk/layer/second").await;
+    let base = resolve_tip(&e, "jjk/layer/first").await;
+    assert!(e.vcs().trees_equal(&top, &monolith_tip).await.unwrap(), "top ≡ monolith");
+    assert!(
+        !e.vcs().trees_equal(&base, &monolith_tip).await.unwrap(),
+        "the lower layer has only its hunk of the shared file"
+    );
+}
+
+#[tokio::test]
+async fn binary_file_lands_in_its_assigned_layer_not_the_remainder() {
+    let (tmp, mut e) = setup().await;
+    let root = tmp.path().to_path_buf();
+    e.branch_create("feature", true).await.unwrap();
+    // A binary file (null bytes) + a text file.
+    std::fs::write(root.join("logo.bin"), [0u8, 1, 2, 3, 0, 255, 7]).unwrap();
+    write(&root, "x.rs", "fn x() {}\n");
+    e.commit("feature: add binary + code").await.unwrap();
+    e.domain_activate(Mode::Change, None, None, None, None)
+        .await
+        .unwrap();
+    // logo.bin sorts before x.rs → a0 = binary; assign it to the lower layer.
+    e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
+        layers: vec![layer("assets", &["a0"], "Binary asset"), layer("code", &["a1"], "Code")],
+    })));
+    e.domain_split(false).await.unwrap();
+
+    let st = ExpansionState::load(&root).unwrap().unwrap();
+    assert_eq!(
+        st.layers.len(),
+        2,
+        "binary placed in its layer — no forced remainder layer: {:?}",
+        st.layers.iter().map(|l| &l.slug).collect::<Vec<_>>()
+    );
+    let monolith_tip = resolve_tip(&e, "feature").await;
+    let top = resolve_tip(&e, "jjk/layer/code").await;
+    assert!(
+        e.vcs().trees_equal(&top, &monolith_tip).await.unwrap(),
+        "binary reconstructed exactly — top ≡ monolith"
+    );
 }

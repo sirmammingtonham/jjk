@@ -106,8 +106,8 @@ pub enum DomainCmd {
     Status,
     /// Explain each layer's contents and the split rationale (read-only).
     Explain(DomainExplainArgs),
-    /// (Re)build the layer stack locally for inspection — no PRs.
-    Rebuild(DomainRebuildArgs),
+    /// Split the monolith into the layer stack locally for inspection — no PRs.
+    Split(DomainSplitArgs),
     /// Deactivate: forget the layer bookmarks, keep the monolith.
     Collapse,
 }
@@ -140,7 +140,7 @@ pub struct DomainExplainArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct DomainRebuildArgs {
+pub struct DomainSplitArgs {
     /// Print the proposed split without materializing layer bookmarks.
     #[arg(long)]
     pub preview: bool,
