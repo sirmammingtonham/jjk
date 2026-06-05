@@ -229,7 +229,7 @@ jj version (jj is pre-1.0 and flag names have churned — e.g. `branch` was rena
 | `jjk commit -m M` | commit current changes | See §3.3 commit algorithm | Multiple commits per branch supported; mid-stack commit auto-restacks upstack. |
 | `jjk commit --amend [-m M]` | amend tip | `jj squash` working changes into branch tip (`@-`) + `jj describe` | Descendants auto-rebase. Can target lower commits too (future flag). |
 | `jjk checkout -b NAME` | new untracked branch | `jj new <current tip>` + `jj bookmark create NAME -r @-` style, **untracked** | Does not enter the stack. |
-| `jjk checkout NAME` | switch to existing branch | `jj new <NAME tip>` (positions empty `@` per §3.2); set current=NAME | Switching is always safe in jj (no dirty-tree errors). |
+| `jjk checkout NAME` | switch to existing branch | clean `@`: `jj new <NAME tip>` (positions empty `@` per §3.2); dirty `@`: `jj rebase -s @ -d <NAME tip>` to **carry** uncommitted changes (git-style); set current=NAME | Never errors on a dirty tree and never strands changes (the old `jj new` parked them as an off-disk commit on the prior branch). A carry that conflicts comes along with markers → resolve flow; `jjk undo` rewinds. |
 | `jjk status` | working-copy status | `jj status` (+ short stack-position hint) | |
 | `jjk stash` / `jjk stash pop` | park/unpark changes | park: bookmark current `@` aside (e.g. `jjk/stash/<n>`) + `jj new @-` for clean `@`; pop: `jj squash --from <stash> --into @` then abandon stash | Mostly unnecessary in jj (switching is safe), provided for muscle memory. |
 
@@ -241,7 +241,7 @@ jj version (jj is pre-1.0 and flag names have churned — e.g. `branch` was rena
 | `jjk track [NAME]` / `jjk untrack [NAME]` | convert tracked⇄untracked | toggle membership in stack state | |
 | `jjk ls` | stack diagram + current position | `jj log` over the stack revset; annotate bookmarks, PR numbers, `@` marker | See §7 rendering. |
 | `jjk restack` | restack the upstack | usually a **no-op** (jj already auto-rebased); recompute + push moved bookmarks | This is "free" with jj. |
-| `jjk up` / `jjk down` / `jjk top` / `jjk bottom` | navigate the stack | move "current" along bookmark ancestry; reposition `@` via `jj new <target tip>` | |
+| `jjk up` / `jjk down` / `jjk top` / `jjk bottom` | navigate the stack | move "current" along bookmark ancestry; reposition `@` like `checkout` (carries uncommitted changes onto the target) | |
 | `jjk undo` | undo last operation | `jj undo` (or `jj op restore`) | Expose jj's op-log; cheap and a major safety net. |
 
 ### Remote / forge

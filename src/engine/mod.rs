@@ -581,7 +581,7 @@ impl Engine {
         Ok(report)
     }
 
-    /// `jjk checkout NAME` — switch to an existing branch (always safe in jj).
+    /// `jjk checkout NAME` — switch to an existing branch, carrying any uncommitted changes along.
     pub async fn checkout(&mut self, name: &str) -> Result<Report> {
         let mut report = Report::default();
         self.ensure_fresh(&mut report).await?;
@@ -590,12 +590,57 @@ impl Engine {
         } else {
             self.branch_tip(name).await?
         };
-        self.vcs.transaction(&mut |tx| {
-            tx.new_child(&tip)?;
-            Ok(())
-        })?;
+        self.switch_onto(&tip, &mut report).await?;
         report.note(format!("switched to {name}"));
         Ok(report)
+    }
+
+    /// Reposition the working copy onto `tip` (a branch tip / trunk anchor), git-style.
+    ///
+    /// With a **clean** working copy this is a fresh empty `@` (`jj new`) — the cheap, common switch.
+    /// With **uncommitted changes** it *carries* them: it rebases the working-copy commit onto `tip`
+    /// (`jj rebase -s @`), so the edits stay uncommitted but now sit on the target — exactly like
+    /// `git checkout` keeping a dirty tree. The old behavior (`jj new`) silently stranded those
+    /// changes as a nameless, off-disk commit on the previous branch, which read as data loss.
+    ///
+    /// If the carry conflicts with the target, jj writes conflict markers into `@` (it never drops
+    /// the changes); we record that in `report.conflicts` so the caller opens the resolve flow, and
+    /// `jjk undo` still reverts the whole switch (a checkpoint was taken before the command).
+    async fn switch_onto(&mut self, tip: &ChangeId, report: &mut Report) -> Result<()> {
+        // Snapshot so on-disk edits are visible before we decide clean-vs-dirty.
+        let wc = self.vcs.snapshot().await?;
+        // A bookmark riding `@` means an empty branch just created (its bookmark sits on the working
+        // copy); rebasing `@` would drag that bookmark onto the target and tangle the stack. That
+        // window only holds a clean `@`, so `is_empty` already routes it to the safe `jj new` path —
+        // but guard explicitly in case changes were made before the first commit.
+        let carrying = !wc.is_empty && !wc.local_bookmarks.iter().any(|b| self.is_stack_bookmark(b));
+        let wc_id = wc.change_id.clone();
+        let tip = tip.clone();
+        self.vcs.transaction(&mut |tx| {
+            if carrying {
+                tx.rebase(&wc_id, &tip)?; // `@` is a leaf, so `-s @` moves only the working copy
+            } else {
+                tx.new_child(&tip)?; // clean switch (or empty branch riding `@`): fresh empty child
+            }
+            Ok(())
+        })?;
+        if carrying {
+            let conflicted = self.vcs.conflicted_paths(&wc_id).await.unwrap_or_default();
+            if conflicted.is_empty() {
+                report.note("brought your uncommitted changes along");
+            } else {
+                let n = conflicted.len();
+                report.note(format!(
+                    "brought your uncommitted changes along — {n} {} with the target",
+                    plural(n, "file now conflicts", "files now conflict")
+                ));
+                report.conflicts.push(format!(
+                    "working copy: {n} {}",
+                    plural(n, "file needs resolution", "files need resolution")
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Navigation: reposition `@` onto a target branch's tip.
@@ -632,10 +677,7 @@ impl Engine {
         } else {
             self.branch_tip(&target).await?
         };
-        self.vcs.transaction(&mut |tx| {
-            tx.new_child(&tip)?;
-            Ok(())
-        })?;
+        self.switch_onto(&tip, &mut report).await?;
         report.note(format!("moved to {target}"));
         Ok(report)
     }
@@ -742,10 +784,7 @@ impl Engine {
         let mut report = Report::default();
         self.ensure_fresh(&mut report).await?;
         let (_, id) = self.trunk_anchor().await?;
-        self.vcs.transaction(&mut |tx| {
-            tx.new_child(&id)?;
-            Ok(())
-        })?;
+        self.switch_onto(&id, &mut report).await?;
         report.note(format!("switched to trunk '{}'", self.state.config.trunk));
         Ok(report)
     }

@@ -110,6 +110,26 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
     let mut resume_cmd: Option<ResumeCmd> = None;
     let mut pushed: Vec<String> = Vec::new();
 
+    // Capture the git index BEFORE anything else: `reconcile_git_head` and `checkpoint` below both
+    // snapshot the working copy, and on some jj versions a colocated snapshot resets the git index
+    // (unstaging everything). If we read the staging later, a plain `jjk commit` would see an empty
+    // index and fall back to committing the whole working copy. Read the user's intent up front,
+    // while the index still reflects what they staged. Only for a plain commit, where staging scopes
+    // the commit (`-i`/explicit paths/amend/fixup/split/pick don't consult the index).
+    let pre_staged: Option<Vec<String>> = match &command {
+        Command::Commit(a)
+            if !a.interactive
+                && a.paths.is_empty()
+                && !a.amend
+                && a.fixup.is_none()
+                && !a.split
+                && a.pick.is_none() =>
+        {
+            Some(engine.staged_paths().await?)
+        }
+        _ => None,
+    };
+
     // Follow a plain `git checkout`: if git HEAD moved out from under jj, reconcile so position
     // tracking is correct (jjk's fast reads skip jj's HEAD import). Surface where we landed.
     let reconciled = engine.reconcile_git_head().await?;
@@ -160,7 +180,9 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
                         args.paths.iter().map(|p| to_root_relative(cwd, &root, p)).collect(),
                     )
                 } else {
-                    let staged = engine.staged_paths().await?;
+                    // Use the staging captured before reconcile/checkpoint (above), so a colocated
+                    // snapshot that reset the git index can't silently turn this into "commit all".
+                    let staged = pre_staged.unwrap_or_default();
                     if staged.is_empty() {
                         CommitScope::All
                     } else {
@@ -194,6 +216,7 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             } else {
                 engine.checkout(&args.name).await?
             };
+            conflicts = !report.conflicts.is_empty();
             render::print_report(&report);
         }
 
@@ -288,11 +311,31 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             print!("{}", render::render_ll(&stack));
         }
 
-        Command::Up => render::print_report(&engine.navigate(NavDir::Up).await?),
-        Command::Down => render::print_report(&engine.navigate(NavDir::Down).await?),
-        Command::Top => render::print_report(&engine.navigate(NavDir::Top).await?),
-        Command::Bottom => render::print_report(&engine.navigate(NavDir::Bottom).await?),
-        Command::Trunk => render::print_report(&engine.trunk_checkout().await?),
+        Command::Up => {
+            let report = engine.navigate(NavDir::Up).await?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
+        }
+        Command::Down => {
+            let report = engine.navigate(NavDir::Down).await?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
+        }
+        Command::Top => {
+            let report = engine.navigate(NavDir::Top).await?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
+        }
+        Command::Bottom => {
+            let report = engine.navigate(NavDir::Bottom).await?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
+        }
+        Command::Trunk => {
+            let report = engine.trunk_checkout().await?;
+            conflicts = !report.conflicts.is_empty();
+            render::print_report(&report);
+        }
 
         Command::Undo => render::print_report(&engine.undo().await?),
 

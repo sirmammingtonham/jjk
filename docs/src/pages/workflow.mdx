@@ -83,6 +83,15 @@ To amend the tip of a branch instead of adding a commit:
 jjk commit --amend -m "reworded"
 ```
 
+Started editing on the wrong branch? Switching carries uncommitted changes along (like `git
+checkout` with a dirty tree), so you can move work to where it belongs and commit there:
+
+```bash
+# ...realize these edits belong one branch down...
+jjk down                         # uncommitted changes come with you
+jjk commit -m "fix on the lower branch"
+```
+
 ## 4. Merge and sync
 
 Merge the **bottom** PR on GitHub. Squash and merge-commit are both handled. Then:

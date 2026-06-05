@@ -25,11 +25,11 @@ description: Every jjk command at a glance.
 | `jjk commit --split` | Split the branch tip into two commits (interactive diff editor). |
 | `jjk commit --pick <rev>` | Copy a commit (e.g. from an upstack branch) onto the current branch. |
 | `jjk checkout -b <name>` | Create a new **untracked** branch on top of the current one. |
-| `jjk checkout <name>` | Switch to an existing branch (always safe; never errors on uncommitted work). |
+| `jjk checkout <name>` | Switch to an existing branch, **carrying any uncommitted changes along** (like `git checkout` with a dirty tree) — handy for moving work to another branch in the stack. If a carried change conflicts with the target it comes along as a conflict to resolve; nothing is ever lost (`jjk undo` rewinds the switch). |
 | `jjk status` | Working-copy status plus your position in the stack. |
 | `jjk ls` | Stack diagram (branches only). |
 | `jjk ll` | Stack diagram with each branch's commits. |
-| `jjk stash` / `jjk stash pop` | Park / restore working-copy changes (mostly unnecessary, since switching is safe in jj). |
+| `jjk stash` / `jjk stash pop` | Park / restore working-copy changes (mostly unnecessary — switching branches already carries your uncommitted changes along). |
 | `jjk add` | Friendly reminder that jjk has no staging area of its own but honors git's (`git add` then `jjk commit`). |
 
 ## Stack management
@@ -46,8 +46,8 @@ description: Every jjk command at a glance.
 | `jjk branch split <new> <commit>` | Split the current branch at `<commit>` into two branches (`<new>` takes the lower commits). |
 | `jjk track [name]` / `jjk untrack [name]` | Toggle whether a branch is part of the stack / gets a PR. Defaults to the current branch. |
 | `jjk restack` | Re-parent the upstack onto its bases. Usually a no-op (jj auto-rebases). |
-| `jjk up` / `jjk down` | Move one branch away from / toward trunk. |
-| `jjk top` / `jjk bottom` / `jjk trunk` | Jump to the top / bottom of the stack, or to trunk. |
+| `jjk up` / `jjk down` | Move one branch away from / toward trunk. Carries any uncommitted changes along. |
+| `jjk top` / `jjk bottom` / `jjk trunk` | Jump to the top / bottom of the stack, or to trunk. Carries any uncommitted changes along. |
 | `jjk resolve` | Start resolving conflicts: jump to the first conflicted change and list the files to fix. |
 | `jjk resolve --continue` | Record the current fix and move to the next conflict — or, when all are resolved, return to the branch you started on and resume the sync. |
 | `jjk resolve --interactive` / `-i` | Resolve the current conflict with your configured merge tool, one file at a time. |
