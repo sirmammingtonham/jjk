@@ -250,7 +250,13 @@ impl Engine {
     fn build_splitter(&self) -> Box<dyn Splitter> {
         use crate::llm::anthropic::AnthropicLlm;
         use crate::llm::FakeSplitter;
-        match AnthropicLlm::from_env(self.state.config.llm_model.clone()) {
+        // Env overrides beat per-repo config, so a tougher split can pick a more powerful model /
+        // more effort for a single run without editing state: `JJK_LLM_MODEL`, `JJK_LLM_THINKING`.
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        let model = env("JJK_LLM_MODEL").unwrap_or_else(|| self.state.config.llm_model.clone());
+        let thinking =
+            env("JJK_LLM_THINKING").unwrap_or_else(|| self.state.config.llm_thinking.clone());
+        match AnthropicLlm::from_env(&model, &thinking) {
             Some(llm) => Box::new(llm),
             None => Box::new(FakeSplitter::deterministic()),
         }

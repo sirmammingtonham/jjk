@@ -20,9 +20,14 @@ pub struct Config {
     pub vcs_backend: String,
     #[serde(default = "default_forge_backend")]
     pub forge_backend: String,
-    /// Anthropic model used by Domain Expansion's splitter. Overridable per-repo.
+    /// Domain Expansion splitter model: `auto` tiers by changeset size, or pin an id /
+    /// `opus`/`sonnet`/`haiku`. Override per-run with `JJK_LLM_MODEL`.
     #[serde(default = "default_llm_model")]
     pub llm_model: String,
+    /// Domain Expansion thinking effort: `auto` scales by complexity, or `off`/`low`/`high`/`max` /
+    /// a token budget. Override per-run with `JJK_LLM_THINKING`.
+    #[serde(default = "default_llm_thinking")]
+    pub llm_thinking: String,
 }
 
 fn default_forge() -> String {
@@ -36,6 +41,9 @@ fn default_forge_backend() -> String {
 }
 fn default_llm_model() -> String {
     crate::llm::anthropic::DEFAULT_MODEL.to_string()
+}
+fn default_llm_thinking() -> String {
+    crate::llm::anthropic::DEFAULT_THINKING.to_string()
 }
 
 /// Per-branch persisted record. Keyed by branch name; validated against the jj change id so it
@@ -79,6 +87,7 @@ impl State {
                 vcs_backend: default_vcs_backend(),
                 forge_backend: default_forge_backend(),
                 llm_model: default_llm_model(),
+                llm_thinking: default_llm_thinking(),
             },
             branches: BTreeMap::new(),
         }

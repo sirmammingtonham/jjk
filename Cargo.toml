@@ -21,6 +21,7 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
+minijinja = "2.20.0"
 
 [dev-dependencies]
 tempfile = "3"
