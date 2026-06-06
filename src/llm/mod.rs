@@ -91,6 +91,23 @@ fn default_true() -> bool {
 #[async_trait]
 pub trait Splitter: Send + Sync {
     async fn split(&self, input: &SplitInput) -> Result<SplitPlan>;
+
+    /// Revise a previously proposed plan per the user's natural-language `feedback` (e.g. "combine
+    /// these into two PRs"). The default folds the feedback into the instruction and re-splits; the
+    /// real adapter shows the model its prior plan + the feedback and asks for an adjusted split.
+    async fn revise(
+        &self,
+        input: &SplitInput,
+        _previous: &SplitPlan,
+        feedback: &str,
+    ) -> Result<SplitPlan> {
+        let mut input = input.clone();
+        input.instruction = Some(match input.instruction.take() {
+            Some(prev) => format!("{prev}\n\nRevision requested: {feedback}"),
+            None => format!("Revision requested: {feedback}"),
+        });
+        self.split(&input).await
+    }
 }
 
 /// Test + offline fallback splitter. With a scripted plan it returns it verbatim (so tests pin the
