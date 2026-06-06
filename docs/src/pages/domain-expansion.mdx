@@ -44,15 +44,26 @@ jjk branch create my-feature
 # 2. turn on Domain Expansion for this branch
 jjk domain expansion                 # mode: change (default)
 
-# 3. submit — jjk splits the branch and opens a stacked PR per piece
-jjk submit
-#   → shows the proposed split for you to approve / edit / abort
-#   → reconstructs the stack and opens the PRs
+# 3. split it locally — no PRs yet (the recommended first step)
+jjk domain split
+#   → shows the proposed split; refine it conversationally ("combine these into
+#     two PRs"), then accept — and the layer branches are built locally
+jjk ll                               # eyeball the generated layer stack
+jjk branch diff                      # diff a layer against its base
 
-# 4. address feedback on the SAME branch, then re-sync
+# 4. happy with it? open the PRs
+jjk submit
+
+# 5. address feedback on the SAME branch, then re-sync
 # ...edit, jjk commit...
 jjk sync                             # re-splits; existing PRs stay put
 ```
+
+**You don't need to submit to split.** `jjk domain split` builds the stack locally so you can
+review and verify it (`jjk ll`, `jjk branch diff`, run your build) *before* anything is pushed —
+that's the recommended way to work. `jjk submit` will split on its own if you skip ahead, but when
+you've already run `domain split` it reuses that exact stack (no second LLM call) as long as you
+haven't changed the monolith since.
 
 You stay on `my-feature` the whole time. The generated branches reuse your branch's prefix — an
 `ethan/monolith` monolith produces `ethan/<slug>` branches (a prefix-less branch falls back to
@@ -65,11 +76,14 @@ jjk domain expansion [--mode feature|change|slice]
                      [--instruction "<free-text guidance>"]
                      [--verify "<build/test command>"]
                      [--model <auto|opus|sonnet|haiku|model-id>]
-                     [--effort <auto|off|low|high|max|N>]
+                     [--effort <auto|off|low|medium|high|max>]
 ```
 
 This records the current branch as the **monolith** (in `.jj/jjk/expansion.json`). No split happens
-yet — the actual decomposition runs on your next `submit` or `sync` (or `domain split`).
+yet. From here, the recommended next step is **`jjk domain split`** — it decomposes the branch and
+builds the layer stack locally so you can inspect it, with no PRs. (`submit` and `sync` also split
+on their own, so you *can* skip straight to them — but splitting first lets you look before you
+push.)
 
 ### Modes
 
@@ -99,10 +113,10 @@ monolith branch to your committed work). A plain `git commit` also works in the 
 > subjects** to the LLM as grouping hints — a tidy history produces a better split, even though the
 > model is free to redraw the lines.
 
-## Reviewing the split
+## Reviewing & refining the split
 
-When `submit` runs in Domain Expansion mode, it shows the proposed stack **before** creating
-anything:
+`jjk domain split` and `jjk submit` both show the proposed stack **before** building anything, and
+let you adjust it conversationally — the model proposes, you respond, it re-proposes:
 
 ```
 Proposed split into 3 layer(s) (bottom→top):
@@ -110,17 +124,21 @@ Proposed split into 3 layer(s) (bottom→top):
   2. Add cache module [cache-module]
   3. Wire authentication and cache into main app [app-integration]
 
-[a]ccept / [e]dit / a[b]ort:
+[a]ccept / [r]efine (tell the model what to change) / [e]dit / a[b]ort:
 ```
 
-- **accept** — build the stack and open the PRs.
-- **edit** — open the plan in `$EDITOR` (JSON: which atoms go in which layer, titles, ordering),
-  tweak it, and jjk builds the stack from your edited plan.
+- **accept** — build the stack as shown.
+- **refine** — type feedback in plain English (e.g. *"combine the cache and app layers into one"*,
+  or *"split this into just two PRs"*) and the model re-proposes a revised split. Repeat until you're
+  happy — it's a back-and-forth, like asking a colleague to regroup the changes.
+- **edit** — hand-edit the plan as JSON in `$EDITOR` (which atoms go in which layer, titles,
+  ordering) for precise control.
 - **abort** — cancel; nothing is created.
 
-Skip the gate with `--no-review` (alias `-y`):
+Skip the gate and build the first proposal with `--no-review` (alias `-y`):
 
 ```bash
+jjk domain split --no-review
 jjk submit --no-review
 ```
 
@@ -189,11 +207,13 @@ plus dependency hints), and pulls full diffs for specific atoms only when it nee
 Model and thinking effort **adapt to the changeset size** and are easy to override when a tough split
 wants more horsepower:
 
-- **Model** — `auto` uses **Sonnet** by default, drops to **Haiku** only for very small, simple
-  changesets, and steps up to **Opus** once a changeset gets large (even a big split is only a few
-  thousand tokens, so it's cheap insurance). Or pin `opus`/`sonnet`/`haiku` (or a full model id).
-- **Effort** — `auto` scales the thinking budget with complexity; or `off`/`low`/`high`/`max`/a token
-  count.
+- **Model** — `auto` uses **Sonnet** for every split (fast enough for interactive use and strong
+  enough for the task). Pin `opus` (more capable, slower), `haiku` (fastest), or a full model id to
+  override.
+- **Effort** — how hard the model thinks. `auto` scales with complexity (off for tiny changesets,
+  up to high for large ones); or pin `off`/`low`/`medium`/`high`/`max`. On current models (Opus,
+  Sonnet) this drives adaptive thinking via the `effort` control; on Haiku it maps to a thinking
+  budget.
 
 Set them three ways, highest priority first:
 
@@ -209,8 +229,10 @@ jjk domain expansion --model opus --effort high
 #   llm_thinking = "auto"
 ```
 
-`submit` logs the token usage per split (`tokens in=… out=… cache_read=…`) so you can see cost and
-prompt-cache hits.
+While a split is running, a live spinner shows the elapsed time so a long thinking call doesn't look
+like a hang; if the model pulls extra detail for specific atoms, that's printed too (`↳ inspecting
+N atom(s)`). When the split finishes, `split`/`submit` log the token usage (`tokens in=… out=…
+cache_read=…`) so you can see cost and prompt-cache hits.
 
 ### No API key
 

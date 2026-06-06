@@ -88,10 +88,10 @@ Work on one branch and let an LLM split it into a stack. See the
 
 | Command | What it does |
 | --- | --- |
-| `jjk domain expansion` | Activate auto-stacking on the current branch (the *monolith*). Flags: `--mode feature\|change\|slice` (default `change`), `--instruction "<text>"`, `--verify "<cmd>"` (per-layer build gate), `--model <auto\|opus\|sonnet\|haiku\|id>`, `--effort <auto\|off\|low\|high\|max\|N>`. Records the mode; the split runs on the next `submit`/`sync`/`expand`. |
+| `jjk domain expansion` | Activate auto-stacking on the current branch (the *monolith*). Flags: `--mode feature\|change\|slice` (default `change`), `--instruction "<text>"`, `--verify "<cmd>"` (per-layer build gate), `--model <auto\|opus\|sonnet\|haiku\|id>`, `--effort <auto\|off\|low\|medium\|high\|max>`. Records the mode; build the stack with `jjk domain split` (recommended) or let `submit`/`sync` split on their own. |
 | `jjk domain status` | Read-only: the monolith ↔ layers map, PR numbers, and ⚠ flags for layers the splitter judged risky. |
 | `jjk domain explain [<layer>]` | Read-only: each layer's grouping rationale and compat notes; with a slug, also its full PR body. |
-| `jjk domain split [--preview]` | Split the monolith into the layer branches locally for inspection — no PRs (split without submitting). `--preview` just prints the proposed split. |
+| `jjk domain split [--preview] [--no-review\|-y]` | **Recommended first step.** Propose a split, **review/refine it conversationally** (give feedback like "combine these into two PRs" and the model re-proposes), then build the layer branches locally — no PRs. A later `jjk submit` reuses this split (no re-run) unless the monolith changed. `--no-review`/`-y` builds the first proposal; `--preview` just prints it without building. |
 | `jjk domain collapse` | Deactivate: forget the `jjk/layer/*` branches; the monolith is untouched. |
 | `jjk submit --no-review` / `-y` | In Domain Expansion mode, accept the proposed split without the interactive review gate. |
 
