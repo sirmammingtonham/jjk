@@ -52,7 +52,8 @@ pub(crate) fn build_split_input(
             kind: change_word(a.change).to_string(),
             defs: a.defs.clone(),
             gist: a.gist.clone(),
-            size: a.added + a.removed,
+            added: a.added,
+            removed: a.removed,
         })
         .collect();
     let hints = edges

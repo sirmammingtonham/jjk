@@ -24,8 +24,10 @@ pub struct AtomGist {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub defs: Vec<String>,
     pub gist: String,
-    /// Total lines touched (added + removed) — a rough size signal.
-    pub size: u32,
+    /// Lines added by this atom (a rough size signal alongside `removed`).
+    pub added: u32,
+    /// Lines removed by this atom.
+    pub removed: u32,
 }
 
 /// An advisory dependency/affinity hint between two atoms (by label).
@@ -221,7 +223,8 @@ mod tests {
             kind: "modify".into(),
             defs: vec![],
             gist: format!("modify {path}"),
-            size: 1,
+            added: 1,
+            removed: 0,
         }
     }
 

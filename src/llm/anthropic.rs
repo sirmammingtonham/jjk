@@ -8,7 +8,7 @@
 //! Model and thinking effort adapt to the changeset size and are easily overridden (config or the
 //! `JJK_LLM_MODEL` / `JJK_LLM_THINKING` env vars) when a tougher split wants a more powerful model.
 
-use super::{SplitInput, SplitPlan, Splitter};
+use super::{EdgeHint, SplitInput, SplitPlan, Splitter};
 use crate::error::{JjkError, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -127,13 +127,15 @@ impl ThinkingChoice {
         }
     }
 
-    /// Resolve to an effort tier for a given atom count. Tiny splits don't need thinking; larger
-    /// ones scale up.
+    /// Resolve to an effort tier for a given atom count. Tiny splits need no thinking; small ones
+    /// (the common single-PR case) get a light pass so they stay fast; only large, tangled diffs
+    /// pull the heavier tiers.
     fn resolve(&self, atoms: usize) -> Effort {
         match self {
             ThinkingChoice::Fixed(e) => *e,
-            ThinkingChoice::Auto if atoms < 10 => Effort::Off,
-            ThinkingChoice::Auto if atoms < 100 => Effort::Medium,
+            ThinkingChoice::Auto if atoms < 8 => Effort::Off,
+            ThinkingChoice::Auto if atoms < 40 => Effort::Low,
+            ThinkingChoice::Auto if atoms < 120 => Effort::Medium,
             ThinkingChoice::Auto => Effort::High,
         }
     }
@@ -246,9 +248,7 @@ impl AnthropicLlm {
 impl AnthropicLlm {
     /// Render the user turn (catalog) from a split input.
     fn user_message(input: &SplitInput) -> Result<String> {
-        let catalog = serde_json::to_string_pretty(input)
-            .map_err(|e| JjkError::Msg(format!("serializing split input: {e}")))?;
-        render_user(&catalog)
+        render_user(&render_catalog(input))
     }
 
     /// The model/effort + tool-loop core, shared by `split` and `revise`. `user` is the first user
@@ -467,6 +467,45 @@ pub(crate) fn render_system(mode: &str, instruction: Option<&str>) -> Result<Str
     })
 }
 
+/// Render the split input as a compact, line-oriented catalog — far cheaper than serializing the
+/// `SplitInput` as JSON (no field names/braces/quotes repeated per atom). One line per atom, then
+/// the cross-file dependency hints, then the author's commit subjects. Same-file affinity is
+/// deliberately omitted: the path is already on every atom line, so `samefile` edges (which grow
+/// O(n²) within a file) would be pure redundancy. Full hunk text is never inlined — the model pulls
+/// it on demand via `get_atom_detail`.
+fn render_catalog(input: &SplitInput) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    s.push_str(
+        "## Atoms\nFormat: `<label>  <kind>  <path>  +<added>/-<removed>  [defines: <symbols>]`\n",
+    );
+    for a in &input.atoms {
+        let _ = write!(s, "{}  {}  {}  +{}/-{}", a.label, a.kind, a.path, a.added, a.removed);
+        if !a.defs.is_empty() {
+            let _ = write!(s, "  defines: {}", a.defs.join(", "));
+        }
+        s.push('\n');
+    }
+    // Cross-file dependency hints only ("A needs B": A uses a symbol B defines). Same-file edges are
+    // implicit in the shared path above, so we don't spend tokens on them.
+    let deps: Vec<&EdgeHint> = input.edges.iter().filter(|e| e.kind == "defuse").collect();
+    if !deps.is_empty() {
+        s.push_str(
+            "\n## Dependency hints\n\"A needs B\" — atom A uses a symbol atom B defines, so B must not sit above A.\n",
+        );
+        for e in &deps {
+            let _ = writeln!(s, "{} needs {}", e.from, e.to);
+        }
+    }
+    if !input.commit_subjects.is_empty() {
+        s.push_str("\n## Author's original commit subjects (bottom→top)\n");
+        for (i, c) in input.commit_subjects.iter().enumerate() {
+            let _ = writeln!(s, "{}. {}", i + 1, c);
+        }
+    }
+    s
+}
+
 /// Render the user message (catalog wrapper) from `prompts/user.md.j2`.
 fn render_user(catalog: &str) -> Result<String> {
     render("user", include_str!("prompts/user.md.j2"), minijinja::context! {
@@ -560,8 +599,9 @@ mod tests {
         // a bare token count buckets onto a tier
         assert_eq!(ThinkingChoice::parse("4000").resolve(1), Effort::Medium);
         assert_eq!(ThinkingChoice::parse("0").resolve(1), Effort::Off);
-        // auto scales with atom count: tiny → off, mid → medium, large → high
+        // auto scales with atom count: tiny → off, small → low, mid → medium, large → high
         assert_eq!(ThinkingChoice::Auto.resolve(3), Effort::Off);
+        assert_eq!(ThinkingChoice::Auto.resolve(30), Effort::Low);
         assert_eq!(ThinkingChoice::Auto.resolve(50), Effort::Medium);
         assert_eq!(ThinkingChoice::Auto.resolve(500), Effort::High);
     }
@@ -597,5 +637,52 @@ mod tests {
     fn user_prompt_embeds_catalog() {
         let u = render_user("{\"atoms\":[]}").unwrap();
         assert!(u.contains("{\"atoms\":[]}"));
+    }
+
+    #[test]
+    fn catalog_is_compact_and_drops_samefile_hints() {
+        use crate::llm::{AtomGist, EdgeHint};
+        use std::collections::HashMap;
+        let input = SplitInput {
+            mode: "change".into(),
+            instruction: None,
+            atoms: vec![
+                AtomGist {
+                    label: "a0".into(),
+                    path: "src/cache.rs".into(),
+                    kind: "add".into(),
+                    defs: vec!["cache_get".into(), "cache_set".into()],
+                    gist: "add src/cache.rs".into(),
+                    added: 12,
+                    removed: 0,
+                },
+                AtomGist {
+                    label: "a1".into(),
+                    path: "src/main.rs".into(),
+                    kind: "modify".into(),
+                    defs: vec![],
+                    gist: "modify src/main.rs".into(),
+                    added: 3,
+                    removed: 1,
+                },
+            ],
+            edges: vec![
+                EdgeHint { from: "a1".into(), to: "a0".into(), kind: "defuse".into() },
+                EdgeHint { from: "a0".into(), to: "a1".into(), kind: "samefile".into() },
+            ],
+            commit_subjects: vec!["Add cache".into()],
+            details: HashMap::new(),
+        };
+        let cat = render_catalog(&input);
+        // One dense line per atom, with size + defs.
+        assert!(cat.contains("a0  add  src/cache.rs  +12/-0  defines: cache_get, cache_set"), "got:\n{cat}");
+        assert!(cat.contains("a1  modify  src/main.rs  +3/-1\n"), "got:\n{cat}");
+        // defuse hint kept; samefile hint omitted (path already conveys it).
+        assert!(cat.contains("a1 needs a0"), "defuse hint missing:\n{cat}");
+        assert!(!cat.contains("samefile"), "samefile leaked into the payload:\n{cat}");
+        // Commit subjects included.
+        assert!(cat.contains("1. Add cache"));
+        // Far smaller than the equivalent pretty JSON would be.
+        assert!(cat.len() < serde_json::to_string_pretty(&input).unwrap().len());
     }
 }
