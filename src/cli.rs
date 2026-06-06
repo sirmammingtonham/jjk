@@ -131,7 +131,7 @@ pub struct DomainExpansionArgs {
     /// (Per-run `JJK_LLM_MODEL` still wins; persists for the monolith.)
     #[arg(long)]
     pub model: Option<String>,
-    /// Thinking effort for the splitter: `auto`, `off`, `low`, `high`, `max`, or a token budget.
+    /// Thinking effort for the splitter: `auto`, `off`, `low`, `medium`, `high`, or `max`.
     /// (Per-run `JJK_LLM_THINKING` still wins; persists for the monolith.)
     #[arg(long)]
     pub effort: Option<String>,
@@ -148,6 +148,9 @@ pub struct DomainSplitArgs {
     /// Print the proposed split without materializing layer bookmarks.
     #[arg(long)]
     pub preview: bool,
+    /// Build the first proposal without the interactive review/refine gate.
+    #[arg(long = "no-review", short = 'y')]
+    pub no_review: bool,
 }
 
 #[derive(Subcommand, Debug)]

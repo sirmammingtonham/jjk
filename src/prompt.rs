@@ -18,7 +18,10 @@ pub struct PrDraft {
 pub enum SplitReview {
     /// Build the split as proposed.
     Accept,
-    /// Build this edited plan instead.
+    /// Send this natural-language feedback back to the splitter for a revised proposal, then review
+    /// again (e.g. "combine these into two PRs"). The conversational refine loop.
+    Revise(String),
+    /// Build this edited plan instead (hand-edited JSON).
     Edit(SplitPlan),
     /// Cancel — touch nothing.
     Abort,

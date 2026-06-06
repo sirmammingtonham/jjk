@@ -314,12 +314,22 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             }
         }
         Command::Ls => {
-            let stack = engine.derive_stack().await?;
-            print!("{}", render::render_ls(&stack));
+            // In Domain Expansion mode show the generated layer stack (the proposed PRs), not the
+            // monolith the user sits on; falls back to the ordinary stack when no layers are built.
+            if let Some(stack) = engine.domain_layer_stack().await? {
+                eprintln!("domain expansion layers (bottom→top):");
+                print!("{}", render::render_ls(&stack));
+            } else {
+                print!("{}", render::render_ls(&engine.derive_stack().await?));
+            }
         }
         Command::Ll => {
-            let stack = engine.derive_stack().await?;
-            print!("{}", render::render_ll(&stack));
+            if let Some(stack) = engine.domain_layer_stack().await? {
+                eprintln!("domain expansion layers (bottom→top):");
+                print!("{}", render::render_ll(&stack));
+            } else {
+                print!("{}", render::render_ll(&engine.derive_stack().await?));
+            }
         }
 
         Command::Up => {
@@ -443,7 +453,16 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             render::print_report(&engine.domain_explain(args.layer).await?);
         }
         Command::Domain(DomainCmd::Split(args)) => {
-            render::print_report(&engine.domain_split(args.preview).await?);
+            // A non-preview split reviews/refines the proposal interactively; install the terminal
+            // prompter on a TTY (non-TTY falls back to AutoFill — accept the first proposal).
+            if !args.preview
+                && !args.no_review
+                && std::io::stdin().is_terminal()
+                && std::io::stdout().is_terminal()
+            {
+                engine.set_prompter(Box::new(TerminalPrompter));
+            }
+            render::print_report(&engine.domain_split(args.preview, args.no_review).await?);
         }
         Command::Domain(DomainCmd::Collapse) => {
             render::print_report(&engine.domain_collapse().await?);
@@ -537,10 +556,20 @@ impl Prompter for TerminalPrompter {
             }
         }
         loop {
-            let ans = prompt_line("\n[a]ccept / [e]dit / a[b]ort: ")?;
+            let ans = prompt_line("\n[a]ccept / [r]efine (tell the model what to change) / [e]dit / a[b]ort: ")?;
             match ans.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
                 Some("") | Some("a") | Some("accept") => return Ok(SplitReview::Accept),
                 Some("b") | Some("abort") | None => return Ok(SplitReview::Abort),
+                Some("r") | Some("refine") | Some("revise") => {
+                    // Free-text feedback goes back to the model, which re-proposes (e.g. "combine
+                    // the db and ui layers into one").
+                    match prompt_line("Describe the change (e.g. \"combine these into two PRs\"): ")? {
+                        Some(f) if !f.trim().is_empty() => {
+                            return Ok(SplitReview::Revise(f.trim().to_string()))
+                        }
+                        _ => eprintln!("no feedback given; pick again"),
+                    }
+                }
                 Some("e") | Some("edit") => {
                     let json = serde_json::to_string_pretty(plan).unwrap_or_default();
                     let edited = edit_in_editor(&json);
@@ -549,7 +578,7 @@ impl Prompter for TerminalPrompter {
                         Err(e) => eprintln!("couldn't parse the edited plan ({e}); try again"),
                     }
                 }
-                _ => eprintln!("please answer a, e, or b"),
+                _ => eprintln!("please answer a, r, e, or b"),
             }
         }
     }

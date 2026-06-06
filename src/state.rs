@@ -24,8 +24,8 @@ pub struct Config {
     /// `opus`/`sonnet`/`haiku`. Override per-run with `JJK_LLM_MODEL`.
     #[serde(default = "default_llm_model")]
     pub llm_model: String,
-    /// Domain Expansion thinking effort: `auto` scales by complexity, or `off`/`low`/`high`/`max` /
-    /// a token budget. Override per-run with `JJK_LLM_THINKING`.
+    /// Domain Expansion thinking effort: `auto` scales by complexity, or `off`/`low`/`medium`/
+    /// `high`/`max`. Override per-run with `JJK_LLM_THINKING`.
     #[serde(default = "default_llm_thinking")]
     pub llm_thinking: String,
 }

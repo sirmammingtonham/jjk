@@ -11,7 +11,7 @@ use crate::vcs::Vcs;
 use super::HIERARCHICAL_THRESHOLD;
 use std::path::{Path, PathBuf};
 
-use super::{Engine, Report, SubmitOptions, SubmitScope};
+use super::{Engine, Report, Stack, SubmitOptions, SubmitScope};
 
 /// A layer (or several folded together by `--verify`) accumulated during reconstruction but not yet
 /// sealed into a commit/bookmark. Identified by the first layer's metadata; `folded` counts how many
@@ -66,7 +66,12 @@ impl Engine {
         if let Some(t) = &st.thinking {
             report.note(color::dim(&format!("effort: {t}")));
         }
-        report.note("run `jjk submit` to split it into a reviewable stack");
+        report.note(color::dim(
+            "next: `jjk domain split` to build & inspect the stack locally (no PRs)",
+        ));
+        report.note(color::dim(
+            "      then `jjk submit` to open the PRs (submit auto-splits too, if you skip ahead)",
+        ));
         Ok(report)
     }
 
@@ -89,7 +94,7 @@ impl Engine {
             report.note(color::dim(&format!("verify: {v}")));
         }
         if st.layers.is_empty() {
-            report.note("no layers yet — run `jjk submit` or `jjk domain split`");
+            report.note("no layers yet — run `jjk domain split` to build them locally, or `jjk submit` to open PRs");
         } else {
             report.note(format!("{} layer(s) (bottom→top):", st.layers.len()));
             for (i, l) in st.layers.iter().enumerate() {
@@ -123,7 +128,13 @@ impl Engine {
     async fn compute_split(&self, st: &ExpansionState) -> Result<expansion::ResolvedSplit> {
         let monolith_tip = self.branch_tip(&st.monolith).await?;
         let (trunk_revset, trunk_id) = self.trunk_anchor().await?;
-        let files = self.vcs.diff_hunks(&trunk_id, &monolith_tip).await?;
+        // Diff from the MERGE-BASE of trunk and the monolith, not trunk's tip. If the monolith was
+        // forked from an older trunk (e.g. trunk advanced after branching), a tip-to-tip tree diff
+        // would also include the *inverse* of trunk's later changes — unrelated files scattered
+        // through the split. The merge-base gives `trunk...monolith` semantics: only the monolith's
+        // own work. (When the monolith is already on trunk's tip, the merge-base IS the tip.)
+        let base = self.merge_base(&trunk_id, &monolith_tip).await?;
+        let files = self.vcs.diff_hunks(&base, &monolith_tip).await?;
         let atoms = expansion::extract_atoms(&files);
         if atoms.is_empty() {
             return Err(JjkError::Msg(format!(
@@ -144,30 +155,104 @@ impl Engine {
             .map(|c| c.subject().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        // Build the full split payload once — used for the holistic split below, and kept on
+        // `ResolvedSplit` so the interactive review loop can ask for revisions.
+        let input = expansion::build_split_input(
+            st.mode,
+            st.instruction.clone(),
+            &atoms,
+            &edges,
+            &files,
+            commit_subjects.clone(),
+        );
         // For very large changesets, split hierarchically so no single LLM call carries the whole
         // catalog; otherwise one call. Either way the LLM draws the boundaries.
         let mut plan = if atoms.len() > HIERARCHICAL_THRESHOLD {
             self.hierarchical_split(st, &atoms, &edges, &files, &commit_subjects)
                 .await?
         } else {
-            let input = expansion::build_split_input(
-                st.mode,
-                st.instruction.clone(),
-                &atoms,
-                &edges,
-                &files,
-                commit_subjects,
-            );
             self.splitter().split(&input).await?
         };
         expansion::repair_completeness(&mut plan, atoms.len());
         Ok(expansion::ResolvedSplit {
             atoms,
             files,
-            trunk: trunk_id,
+            base,
             monolith_tip,
             plan,
+            input,
         })
+    }
+
+    /// The merge-base (latest common ancestor) of `a` and `b`. Falls back to `a` if jj returns
+    /// nothing (e.g. unrelated histories) so the diff still has a base.
+    async fn merge_base(&self, a: &ChangeId, b: &ChangeId) -> Result<ChangeId> {
+        let revset = format!("heads(::{} & ::{})", a.as_str(), b.as_str());
+        Ok(self
+            .vcs
+            .resolve(&revset)
+            .await?
+            .into_iter()
+            .next()
+            .map(|c| c.change_id)
+            .unwrap_or_else(|| a.clone()))
+    }
+
+    /// The derived **layer** stack (anchored at the top built layer), so `ls`/`ll` can show the
+    /// proposed PRs instead of the monolith the user is sitting on. `None` when expansion is
+    /// inactive or no layers have been built yet (then the caller shows the ordinary `@` stack).
+    pub async fn domain_layer_stack(&self) -> Result<Option<Stack>> {
+        let Some(st) = ExpansionState::load(&self.root)? else {
+            return Ok(None);
+        };
+        let Some(top_layer) = st.layers.last() else {
+            return Ok(None);
+        };
+        let Some(top) = self.resolve_bookmark(&top_layer.bookmark).await? else {
+            return Ok(None); // bookmarks gone (e.g. collapsed) — fall back to the normal stack
+        };
+        Ok(Some(self.derive_stack_at(Some(&top)).await?))
+    }
+
+    /// Interactive review of a proposed split, looping on the user's verdict until they accept:
+    /// `Revise(feedback)` re-asks the splitter for an adjusted plan (conversational refine — e.g.
+    /// "combine these into two PRs") and shows it again; `Edit` swaps in hand-edited JSON; `Abort`
+    /// errors. `skip` (or a non-interactive prompter, which accepts by default) is a no-op. Mutates
+    /// `resolved.plan` in place, re-running completeness + layer-matching after each change.
+    async fn review_and_revise(
+        &self,
+        resolved: &mut expansion::ResolvedSplit,
+        prior_layers: &[PersistedLayer],
+        skip: bool,
+    ) -> Result<()> {
+        if skip {
+            return Ok(());
+        }
+        loop {
+            let changed = expansion::changed_layers(&resolved.plan, prior_layers, &resolved.atoms);
+            match self.prompter.review_split(&resolved.plan, &changed)? {
+                SplitReview::Accept => return Ok(()),
+                SplitReview::Edit(p) => {
+                    resolved.plan = p;
+                    expansion::repair_completeness(&mut resolved.plan, resolved.atoms.len());
+                    expansion::match_layers(&mut resolved.plan, prior_layers, &resolved.atoms);
+                    return Ok(());
+                }
+                SplitReview::Revise(feedback) => {
+                    let revised = self
+                        .splitter()
+                        .revise(&resolved.input, &resolved.plan, &feedback)
+                        .await?;
+                    resolved.plan = revised;
+                    expansion::repair_completeness(&mut resolved.plan, resolved.atoms.len());
+                    expansion::match_layers(&mut resolved.plan, prior_layers, &resolved.atoms);
+                    // Loop to re-display the revised plan for another round of review.
+                }
+                SplitReview::Abort => {
+                    return Err(JjkError::Msg("split aborted; nothing changed".into()).into())
+                }
+            }
+        }
     }
 
     /// Split a large changeset in two tiers: bucket the atoms into ≤[`HIERARCHICAL_THRESHOLD`]-sized
@@ -234,7 +319,7 @@ impl Engine {
         let _ = self.vcs.forget_workspace(ws_name).await;
         let _ = std::fs::remove_dir_all(&scratch_dir);
         self.vcs
-            .add_workspace(&scratch_dir, ws_name, &resolved.trunk)
+            .add_workspace(&scratch_dir, ws_name, &resolved.base)
             .await?;
         let scratch = crate::vcs::jj_cli::JjCli::new(&scratch_dir);
 
@@ -261,8 +346,8 @@ impl Engine {
         use std::collections::HashMap;
         use std::fs;
 
-        // 1. Read each non-added touched file's trunk content (the applier's base) from the scratch
-        //    working copy, which currently sits at trunk.
+        // 1. Read each non-added touched file's base content (the applier's base) from the scratch
+        //    working copy, which currently sits at the merge-base.
         let mut base: HashMap<String, String> = HashMap::new();
         for f in &resolved.files {
             let src = match f.change {
@@ -281,7 +366,7 @@ impl Engine {
         //    a non-last layer that can't build on its own is **folded forward** into the next layer
         //    (one combined commit/bookmark/PR) — the only structural change to the LLM's plan.
         let verify_cmd = st.verify_cmd.clone();
-        let mut parent = resolved.trunk.clone();
+        let mut parent = resolved.base.clone();
         let mut included: HashMap<usize, Vec<usize>> = HashMap::new();
         let mut new_layers: Vec<PersistedLayer> = Vec::new();
         // A layer (or several folded together by --verify) accumulated but not yet sealed.
@@ -556,30 +641,20 @@ impl Engine {
 
         let mut resolved = self.compute_split(&st).await?;
         expansion::match_layers(&mut resolved.plan, &st.layers, &resolved.atoms);
-        if !skip_review {
-            let changed = expansion::changed_layers(&resolved.plan, &st.layers, &resolved.atoms);
-            match self.prompter.review_split(&resolved.plan, &changed)? {
-                SplitReview::Accept => {}
-                SplitReview::Edit(p) => {
-                    resolved.plan = p;
-                    expansion::repair_completeness(&mut resolved.plan, resolved.atoms.len());
-                    expansion::match_layers(&mut resolved.plan, &st.layers, &resolved.atoms);
-                }
-                SplitReview::Abort => {
-                    return Err(JjkError::Msg("split aborted; nothing changed".into()).into())
-                }
-            }
-        }
+        let prior = st.layers.clone();
+        self.review_and_revise(&mut resolved, &prior, skip_review).await?;
         let top = self.reconstruct_layers(&mut st, &resolved, report).await?;
         st.save(&self.root)?;
         self.state.save(&self.root)?;
         Ok(Some(top))
     }
 
-    /// `jjk domain split [--preview]` — (re)build the layer stack locally for inspection (no PRs).
-    /// `--preview` only prints the proposed split; otherwise the layer bookmarks are materialized so
-    /// they can be inspected with `jjk ll` / `jjk branch diff` before any submit.
-    pub async fn domain_split(&mut self, preview: bool) -> Result<Report> {
+    /// `jjk domain split [--preview] [--no-review]` — (re)build the layer stack locally for
+    /// inspection (no PRs). `--preview` only prints the proposed split. Otherwise the model proposes
+    /// a split and you review/refine it interactively (give feedback like "combine these into two
+    /// PRs" and it re-proposes) before the layer bookmarks are materialized; `--no-review` skips the
+    /// gate and builds the first proposal.
+    pub async fn domain_split(&mut self, preview: bool, no_review: bool) -> Result<Report> {
         let mut report = Report::default();
         let Some(mut st) = ExpansionState::load(&self.root)? else {
             return Err(JjkError::Msg(
@@ -590,15 +665,22 @@ impl Engine {
         self.ensure_fresh(&mut report).await?;
         let mut resolved = self.compute_split(&st).await?;
         expansion::match_layers(&mut resolved.plan, &st.layers, &resolved.atoms);
-        render_split_plan(&resolved, &mut report);
         if preview {
+            render_split_plan(&resolved, &mut report);
             report.note("(preview only — no bookmarks created; run `jjk submit` to create PRs)");
             return Ok(report);
         }
+        // Interactive review/refine before building (skipped by --no-review / non-TTY prompter).
+        let prior = st.layers.clone();
+        self.review_and_revise(&mut resolved, &prior, no_review).await?;
+        render_split_plan(&resolved, &mut report); // the final, accepted plan
         self.reconstruct_layers(&mut st, &resolved, &mut report).await?;
         st.save(&self.root)?;
         self.state.save(&self.root)?;
-        report.note("inspect with `jjk ll` / `jjk domain status`; `jjk submit` creates the PRs");
+        report.note(color::dim(
+            "inspect with `jjk ll` / `jjk branch diff` / `jjk domain status`",
+        ));
+        report.note("when it looks right, `jjk submit` opens the PRs (reusing this split — no re-run)");
         Ok(report)
     }
 
@@ -611,7 +693,7 @@ impl Engine {
             return Ok(report);
         };
         if st.layers.is_empty() {
-            report.note("no layers yet — run `jjk submit` or `jjk domain split`");
+            report.note("no layers yet — run `jjk domain split` to build them locally, or `jjk submit` to open PRs");
             return Ok(report);
         }
         for (i, l) in st.layers.iter().enumerate() {

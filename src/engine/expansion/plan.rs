@@ -8,13 +8,19 @@ use super::{Mode, PersistedLayer};
 // ---- LLM payload + plan resolution -------------------------------------------------------------
 
 /// Everything `compute_split` produces: the source diff + atoms and the (completeness-repaired)
-/// plan, plus the trunk/monolith anchors needed for reconstruction. Atom labels are `a{index}`.
+/// plan, plus the anchors needed for reconstruction. Atom labels are `a{index}`.
 pub(crate) struct ResolvedSplit {
     pub atoms: Vec<Atom>,
     pub files: Vec<FileDiff>,
-    pub trunk: ChangeId,
+    /// Merge-base of trunk and the monolith — the diff base and the reconstruction root. Using the
+    /// merge-base (not trunk's tip) gives `trunk...monolith` semantics, so a branch forked from an
+    /// older trunk doesn't pick up the inverse of trunk's later changes.
+    pub base: ChangeId,
     pub monolith_tip: ChangeId,
     pub plan: SplitPlan,
+    /// The exact payload handed to the splitter — kept so the interactive review loop can ask for
+    /// revisions ("combine these into two PRs") without recomputing atoms/edges.
+    pub input: SplitInput,
 }
 
 /// Atom label used in the LLM payload / plan: `a{index}`.

@@ -42,6 +42,38 @@ impl jjk::llm::Splitter for OneLayerSplitter {
     }
 }
 
+/// A splitter that splits granularly (one layer per atom) but, when asked to `revise`, coarsens to
+/// exactly two layers — modelling the conversational "combine these into two PRs" feedback.
+struct RevisingSplitter;
+#[async_trait::async_trait]
+impl jjk::llm::Splitter for RevisingSplitter {
+    async fn split(&self, input: &jjk::llm::SplitInput) -> jjk::error::Result<SplitPlan> {
+        Ok(SplitPlan {
+            layers: input
+                .atoms
+                .iter()
+                .enumerate()
+                .map(|(i, a)| layer(&format!("l{i}"), &[a.label.as_str()], &format!("layer {i}")))
+                .collect(),
+        })
+    }
+    async fn revise(
+        &self,
+        input: &jjk::llm::SplitInput,
+        _previous: &SplitPlan,
+        _feedback: &str,
+    ) -> jjk::error::Result<SplitPlan> {
+        let labels: Vec<&str> = input.atoms.iter().map(|a| a.label.as_str()).collect();
+        let mid = labels.len() / 2;
+        Ok(SplitPlan {
+            layers: vec![
+                layer("first", &labels[..mid], "First half"),
+                layer("second", &labels[mid..], "Second half"),
+            ],
+        })
+    }
+}
+
 /// A prompter that yields one scripted split-review verdict, then accepts.
 struct ScriptedPrompter(Mutex<Option<SplitReview>>);
 impl ScriptedPrompter {
@@ -109,7 +141,7 @@ async fn preview_covers_every_changed_file() {
     // Force the offline splitter so the test never reaches the network.
     e.set_splitter(Box::new(FakeSplitter::deterministic()));
 
-    let report = e.domain_split(/*preview=*/ true).await.unwrap();
+    let report = e.domain_split(/*preview=*/ true, false).await.unwrap();
     let text = report.notes.join("\n");
 
     assert!(text.contains("proposed split"), "got:\n{text}");
@@ -118,6 +150,71 @@ async fn preview_covers_every_changed_file() {
     for f in ["auth.rs", "db.rs", "ui.rs"] {
         assert!(text.contains(f), "{f} missing from preview:\n{text}");
     }
+}
+
+#[tokio::test]
+async fn split_diffs_against_merge_base_not_trunk_tip() {
+    // The monolith forks from main, then main advances with an UNRELATED file (without the monolith
+    // being rebased). A tip-to-tip diff would scatter the inverse of that file through the split;
+    // diffing against the merge-base must include only the monolith's own work.
+    let (tmp, mut e) = setup().await;
+    let root = tmp.path().to_path_buf();
+
+    // Monolith forks here and adds feature.rs.
+    e.branch_create("feature", true).await.unwrap();
+    write(&root, "feature.rs", "fn feature() {}\n");
+    e.commit("feature: add feature.rs").await.unwrap();
+
+    // Advance main past the fork with an unrelated file (sibling of feature off the same base),
+    // then point the trunk bookmark at it — main is now ahead and feature was never rebased.
+    e.checkout("main").await.unwrap();
+    e.branch_create("mainwork", true).await.unwrap();
+    write(&root, "unrelated.rs", "fn unrelated() {}\n");
+    e.commit("main: unrelated work").await.unwrap();
+    let advanced = resolve_tip(&e, "bookmarks(exact:\"mainwork\")").await;
+    e.vcs()
+        .transaction(&mut |tx| tx.set_bookmark("main", &advanced))
+        .unwrap();
+
+    // Back on the monolith, split it.
+    e.checkout("feature").await.unwrap();
+    e.domain_activate(Mode::Change, None, None, None, None).await.unwrap();
+    e.set_splitter(Box::new(FakeSplitter::deterministic()));
+
+    let text = e.domain_split(/*preview=*/ true, false).await.unwrap().notes.join("\n");
+    assert!(text.contains("feature.rs"), "monolith's own file missing:\n{text}");
+    assert!(
+        !text.contains("unrelated.rs"),
+        "trunk's later file leaked into the split (diffed vs tip, not merge-base):\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn refine_loop_re_splits_from_feedback_before_building() {
+    // The model first proposes a granular split (one layer per atom). The user refines ("combine
+    // these…"); the splitter re-proposes two layers; the user accepts. The built stack must be the
+    // refined two-layer split, not the granular original.
+    let (tmp, mut e) = setup().await;
+    monolith(&mut e, tmp.path()).await; // 3 files → 3 atoms → granular = 3 layers
+
+    e.domain_activate(Mode::Change, None, None, None, None).await.unwrap();
+    e.set_splitter(Box::new(RevisingSplitter));
+    // One Revise verdict, then the prompter accepts the re-proposed plan.
+    e.set_prompter(Box::new(ScriptedPrompter::new(SplitReview::Revise(
+        "combine these into two PRs".into(),
+    ))));
+
+    e.domain_split(/*preview=*/ false, /*no_review=*/ false).await.unwrap();
+
+    let layers = e
+        .vcs()
+        .bookmarks()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|b| b.name.starts_with("jjk/layer/"))
+        .count();
+    assert_eq!(layers, 2, "granular split was refined to two layers before building");
 }
 
 #[tokio::test]
@@ -141,7 +238,7 @@ async fn engine_respects_the_splitter_grouping_without_reclustering() {
     };
     e.set_splitter(Box::new(FakeSplitter::scripted(plan)));
 
-    let report = e.domain_split(true).await.unwrap();
+    let report = e.domain_split(true, false).await.unwrap();
     let text = report.notes.join("\n");
     assert!(text.contains("1 layer (bottom→top)"), "got:\n{text}");
     assert!(text.contains("All the work"));
@@ -185,7 +282,7 @@ async fn reconstruct_builds_a_tree_equivalent_stack() {
         ],
     };
     e.set_splitter(Box::new(FakeSplitter::scripted(plan)));
-    e.domain_split(/*preview=*/ false).await.unwrap();
+    e.domain_split(/*preview=*/ false, /*no_review=*/ true).await.unwrap();
 
     // Two layer bookmarks exist.
     let bms = e.vcs().bookmarks().await.unwrap();
@@ -254,11 +351,13 @@ async fn submit_in_domain_mode_opens_a_pr_per_layer_with_correct_bases() {
         "jjk/layer/base",
         "top layer based on the layer below it"
     );
-    // Nav comment posted on the stack.
+    // Nav comment posted on the stack, and it subtly notes the stack was auto-split.
     let base_pr = fake.pr_for("jjk/layer/base").unwrap().number;
+    let nav = &fake.comments_on(base_pr)[0];
+    assert!(nav.contains("stack"), "stack nav comment posted");
     assert!(
-        fake.comments_on(base_pr).iter().any(|c| c.contains("stack")),
-        "stack nav comment posted"
+        nav.contains("Domain Expansion"),
+        "nav comment notes auto-split:\n{nav}"
     );
 
     // Idempotent: re-submitting the unchanged monolith creates no duplicates.
@@ -455,7 +554,7 @@ async fn hierarchical_split_for_large_changesets() {
     e.domain_activate(Mode::Change, None, None, None, None).await.unwrap();
     e.set_splitter(Box::new(OneLayerSplitter));
 
-    e.domain_split(/*preview=*/ false).await.unwrap();
+    e.domain_split(/*preview=*/ false, /*no_review=*/ true).await.unwrap();
 
     let st = ExpansionState::load(&root).unwrap().unwrap();
     assert_eq!(st.layers.len(), 2, "two buckets → two layers (one per bucket)");
@@ -482,7 +581,7 @@ async fn verify_passing_keeps_all_layers() {
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
     })));
-    let report = e.domain_split(false).await.unwrap().notes.join("\n");
+    let report = e.domain_split(false, true).await.unwrap().notes.join("\n");
     assert!(report.contains("verified all layers"), "got:\n{report}");
     let st = ExpansionState::load(&root).unwrap().unwrap();
     assert_eq!(st.layers.len(), 2, "both layers kept when each builds");
@@ -499,7 +598,7 @@ async fn verify_failure_folds_layers_forward() {
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
     })));
-    let report = e.domain_split(false).await.unwrap().notes.join("\n");
+    let report = e.domain_split(false, true).await.unwrap().notes.join("\n");
     assert!(report.contains("merging into the next layer"), "got:\n{report}");
 
     // The failing bottom layer is folded into the last → a single sealed layer covering everything.
@@ -551,7 +650,7 @@ async fn status_and_explain_surface_compat_and_rationale() {
         }],
     };
     e.set_splitter(Box::new(FakeSplitter::scripted(plan)));
-    e.domain_split(false).await.unwrap();
+    e.domain_split(false, true).await.unwrap();
 
     let status = e.domain_status().await.unwrap().notes.join("\n");
     assert!(status.contains('⚠'), "status flags the risky layer: {status}");
@@ -588,7 +687,7 @@ async fn layer_branches_follow_the_monolith_prefix() {
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("base", &["a0"], "Base"), layer("top", &["a1"], "Top")],
     })));
-    e.domain_split(false).await.unwrap();
+    e.domain_split(false, true).await.unwrap();
 
     let bms = e.vcs().bookmarks().await.unwrap();
     assert!(bms.iter().any(|b| b.name == "ethan/base"), "got: {bms:?}");
@@ -627,7 +726,7 @@ async fn same_file_can_split_across_layers() {
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("first", &["a0"], "First edit"), layer("second", &["a1"], "Second edit")],
     })));
-    e.domain_split(false).await.unwrap();
+    e.domain_split(false, true).await.unwrap();
 
     let st = ExpansionState::load(&root).unwrap().unwrap();
     assert_eq!(st.layers.len(), 2, "no remainder — the file split cleanly across two layers");
@@ -657,7 +756,7 @@ async fn binary_file_lands_in_its_assigned_layer_not_the_remainder() {
     e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
         layers: vec![layer("assets", &["a0"], "Binary asset"), layer("code", &["a1"], "Code")],
     })));
-    e.domain_split(false).await.unwrap();
+    e.domain_split(false, true).await.unwrap();
 
     let st = ExpansionState::load(&root).unwrap().unwrap();
     assert_eq!(
