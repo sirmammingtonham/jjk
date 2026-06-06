@@ -25,12 +25,36 @@ const RED: &str = "31";
 
 /// `jjk ls` — the stack tree (branches only).
 pub fn render_ls(stack: &Stack) -> String {
-    render_tree(stack, false, colors_on())
+    render_tree(stack, false, colors_on(), true)
 }
 
 /// `jjk ll` — the stack tree with each branch's commits.
 pub fn render_ll(stack: &Stack) -> String {
-    render_tree(stack, true, colors_on())
+    render_tree(stack, true, colors_on(), true)
+}
+
+/// `jjk ls` while Domain Expansion is active: the *generated* layer stack (the proposed PRs), headed
+/// by the monolith the working copy actually sits on. No layer is marked "current" — `@` is on the
+/// monolith, off to the side of this stack, so a current marker would be misleading.
+pub fn render_domain_ls(stack: &Stack, monolith: &str) -> String {
+    domain_header(monolith) + &render_tree(stack, false, colors_on(), false)
+}
+
+/// `jjk ll` counterpart of [`render_domain_ls`] (layer commits shown).
+pub fn render_domain_ll(stack: &Stack, monolith: &str) -> String {
+    domain_header(monolith) + &render_tree(stack, true, colors_on(), false)
+}
+
+/// The line printed above the layer tree in Domain Expansion mode, naming the checked-out monolith
+/// the stack is decomposed from.
+fn domain_header(monolith: &str) -> String {
+    let on = colors_on();
+    format!(
+        "{} {} {}\n",
+        paint(on, DIM, "domain expansion — decomposing monolith"),
+        paint(on, &format!("{BOLD};{GREEN}"), monolith),
+        paint(on, DIM, "into the proposed PR stack below (bottom→top):"),
+    )
 }
 
 // Heavy box-drawing glyphs, matching git-spice's fliptree renderer.
@@ -43,14 +67,16 @@ const G_VERTICAL: &str = "┃";
 /// branch is one level deeper than the one below; its single `┏` corner drops a `┃` pipe (as long
 /// as its commit list) into the `┻` of the branch beneath it — one bend per branch, no trailing
 /// joint.
-fn render_tree(stack: &Stack, show_commits: bool, color: bool) -> String {
+fn render_tree(stack: &Stack, show_commits: bool, color: bool, mark_current: bool) -> String {
     let n = stack.branches.len();
     let mut out = String::new();
-    let current = stack.current.as_deref();
+    // When `mark_current` is false (Domain Expansion: `@` is on the monolith, not in this stack) no
+    // branch — and not trunk — is flagged as the current position.
+    let current = if mark_current { stack.current.as_deref() } else { None };
 
     for i in (0..n).rev() {
         let b = &stack.branches[i];
-        let is_cur = Some(b.name.as_str()) == current;
+        let is_cur = mark_current && Some(b.name.as_str()) == current;
         let has_child = i + 1 < n; // a branch is stacked directly above this one
         let indent = "  ".repeat(i);
 
@@ -102,9 +128,10 @@ fn render_tree(stack: &Stack, show_commits: bool, color: bool) -> String {
         }
     }
 
-    // Trunk line (root): name only, no box/pipe, with the current marker if the working copy is on it.
+    // Trunk line (root): name only, no box/pipe, with the current marker if the working copy is on it
+    // (only when we're marking a current position at all).
     let mut tline = paint(color, &format!("{BOLD};{GREEN}"), &stack.trunk_name);
-    if current.is_none() {
+    if mark_current && current.is_none() {
         tline.push_str(&paint(color, GREEN, " ◀"));
     }
     out.push_str(&tline);

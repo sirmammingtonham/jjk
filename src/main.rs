@@ -314,19 +314,17 @@ async fn dispatch_in_repo(cwd: &std::path::Path, command: Command) -> anyhow::Re
             }
         }
         Command::Ls => {
-            // In Domain Expansion mode show the generated layer stack (the proposed PRs), not the
-            // monolith the user sits on; falls back to the ordinary stack when no layers are built.
-            if let Some(stack) = engine.domain_layer_stack().await? {
-                eprintln!("domain expansion layers (bottom→top):");
-                print!("{}", render::render_ls(&stack));
+            // In Domain Expansion mode show the generated layer stack (the proposed PRs), headed by
+            // the monolith the user sits on; falls back to the ordinary stack when no layers exist.
+            if let Some((stack, monolith)) = engine.domain_view().await? {
+                print!("{}", render::render_domain_ls(&stack, &monolith));
             } else {
                 print!("{}", render::render_ls(&engine.derive_stack().await?));
             }
         }
         Command::Ll => {
-            if let Some(stack) = engine.domain_layer_stack().await? {
-                eprintln!("domain expansion layers (bottom→top):");
-                print!("{}", render::render_ll(&stack));
+            if let Some((stack, monolith)) = engine.domain_view().await? {
+                print!("{}", render::render_domain_ll(&stack, &monolith));
             } else {
                 print!("{}", render::render_ll(&engine.derive_stack().await?));
             }

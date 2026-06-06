@@ -314,6 +314,64 @@ async fn reconstruct_builds_a_tree_equivalent_stack() {
 }
 
 #[tokio::test]
+async fn domain_view_names_the_monolith_and_marks_no_layer_current() {
+    let (tmp, mut e) = setup().await;
+    let root = tmp.path().to_path_buf();
+    monolith(&mut e, &root).await;
+    e.domain_activate(Mode::Change, None, None, None, None).await.unwrap();
+    e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
+        layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
+    })));
+    e.domain_split(/*preview=*/ false, /*no_review=*/ true).await.unwrap();
+
+    let (stack, monolith_name) = e.domain_view().await.unwrap().expect("layers built");
+    // The view names the checked-out monolith…
+    assert_eq!(monolith_name, "feature");
+    // …shows the generated layer stack…
+    let names: Vec<&str> = stack.branches.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["jjk/layer/base", "jjk/layer/top"]);
+    // …and marks NO layer as current (the user is on the monolith, not on the top layer).
+    assert!(stack.current.is_none(), "no layer should be flagged current; @ is on the monolith");
+}
+
+#[tokio::test]
+async fn stack_drop_in_domain_mode_drops_layers_but_keeps_mode_active() {
+    let (tmp, mut e) = setup().await;
+    let root = tmp.path().to_path_buf();
+    monolith(&mut e, &root).await;
+    e.domain_activate(Mode::Change, None, None, None, None).await.unwrap();
+    e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
+        layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
+    })));
+    e.domain_split(/*preview=*/ false, /*no_review=*/ true).await.unwrap();
+    assert!(e.vcs().bookmarks().await.unwrap().iter().any(|b| b.name.starts_with("jjk/layer/")));
+
+    // `jjk stack drop` in domain mode forgets the generated layers (rather than the unhelpful "no
+    // tracked branches" message) but KEEPS domain mode active so a re-split rebuilds them.
+    e.stack_drop(/*assume_yes=*/ true).await.unwrap();
+
+    let st = ExpansionState::load(&root).unwrap().expect("domain mode still active after drop");
+    assert!(st.layers.is_empty(), "the sidecar's layer list is cleared");
+    assert_eq!(st.monolith, "feature", "the monolith is still recorded");
+    let bms = e.vcs().bookmarks().await.unwrap();
+    assert!(
+        !bms.iter().any(|b| b.name.starts_with("jjk/layer/")),
+        "generated layer bookmarks should be forgotten"
+    );
+    assert!(bms.iter().any(|b| b.name == "feature"), "the monolith branch is untouched");
+
+    // And a fresh split rebuilds the stack (mode was preserved).
+    e.set_splitter(Box::new(FakeSplitter::scripted(SplitPlan {
+        layers: vec![layer("base", &["a0", "a1"], "Base"), layer("top", &["a2"], "Top")],
+    })));
+    e.domain_split(/*preview=*/ false, /*no_review=*/ true).await.unwrap();
+    assert!(
+        e.vcs().bookmarks().await.unwrap().iter().any(|b| b.name.starts_with("jjk/layer/")),
+        "re-split rebuilds the layer stack"
+    );
+}
+
+#[tokio::test]
 async fn submit_in_domain_mode_opens_a_pr_per_layer_with_correct_bases() {
     let mut h = setup_with_remote().await;
     let root = h.repo.path().to_path_buf();

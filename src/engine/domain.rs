@@ -198,10 +198,13 @@ impl Engine {
             .unwrap_or_else(|| a.clone()))
     }
 
-    /// The derived **layer** stack (anchored at the top built layer), so `ls`/`ll` can show the
-    /// proposed PRs instead of the monolith the user is sitting on. `None` when expansion is
-    /// inactive or no layers have been built yet (then the caller shows the ordinary `@` stack).
-    pub async fn domain_layer_stack(&self) -> Result<Option<Stack>> {
+    /// The derived **layer** stack (anchored at the top built layer) plus the monolith branch name,
+    /// so `ls`/`ll` can show the proposed PRs the monolith is decomposed into. `@` sits on the
+    /// monolith — *off to the side* of this generated chain — so the stack's `current` is cleared:
+    /// no layer is the checked-out branch, and the monolith is named in the rendered header instead.
+    /// `None` when expansion is inactive or no layers have been built yet (then the caller shows the
+    /// ordinary `@` stack).
+    pub async fn domain_view(&self) -> Result<Option<(Stack, String)>> {
         let Some(st) = ExpansionState::load(&self.root)? else {
             return Ok(None);
         };
@@ -211,7 +214,10 @@ impl Engine {
         let Some(top) = self.resolve_bookmark(&top_layer.bookmark).await? else {
             return Ok(None); // bookmarks gone (e.g. collapsed) — fall back to the normal stack
         };
-        Ok(Some(self.derive_stack_at(Some(&top)).await?))
+        let mut stack = self.derive_stack_at(Some(&top)).await?;
+        // `@` is on the monolith, not on the top layer the anchor would otherwise mark as current.
+        stack.current = None;
+        Ok(Some((stack, st.monolith)))
     }
 
     /// Interactive review of a proposed split, looping on the user's verdict until they accept:
@@ -836,6 +842,52 @@ impl Engine {
         Ok(report)
     }
 
+    /// Forget the generated `jjk/layer/*` bookmarks for `layers` and drop their `BranchEntry`s.
+    /// Does **not** touch the sidecar — the caller decides whether domain mode stays active. Saves
+    /// `state.toml` if anything changed. Returns how many bookmarks were forgotten.
+    async fn forget_layer_bookmarks(&mut self, layers: &[PersistedLayer]) -> Result<usize> {
+        let names: Vec<String> = layers.iter().map(|l| l.bookmark.clone()).collect();
+        if names.is_empty() {
+            return Ok(0);
+        }
+        self.vcs.transaction(&mut |tx| {
+            for name in &names {
+                tx.forget_bookmark(name)?;
+            }
+            Ok(())
+        })?;
+        for name in &names {
+            self.state.branches.remove(name);
+        }
+        self.state.save(&self.root)?;
+        Ok(names.len())
+    }
+
+    /// Drop the generated layer stack but **keep domain mode active**: forget the `jjk/layer/*`
+    /// bookmarks and clear the sidecar's layer list (so the next `domain split`/`submit` rebuilds
+    /// from scratch), leaving the monolith and the mode itself untouched. This is what `jjk stack
+    /// drop` does in domain mode — a non-destructive reset of the proposed PRs.
+    pub async fn domain_drop_stack(&mut self) -> Result<Report> {
+        let mut report = Report::default();
+        let Some(mut st) = ExpansionState::load(&self.root)? else {
+            report.note("domain expansion is not active");
+            return Ok(report);
+        };
+        let n = self.forget_layer_bookmarks(&st.layers).await?;
+        st.layers.clear();
+        st.monolith_commit = None; // no prior expansion remains; force a fresh split next time
+        st.save(&self.root)?;
+        report.note(color::green(&format!(
+            "dropped {n} generated layer{}; domain expansion still active on '{}'",
+            if n == 1 { "" } else { "s" },
+            st.monolith
+        )));
+        report.note(color::dim(
+            "re-run `jjk domain split` to rebuild, or `jjk domain collapse` to turn the mode off",
+        ));
+        Ok(report)
+    }
+
     /// `jjk domain collapse` — deactivate. Forgets the generated layer bookmarks locally (leaving the
     /// monolith and its history untouched) and removes the sidecar. Remote PR branches are left as-is.
     pub async fn domain_collapse(&mut self) -> Result<Report> {
@@ -844,24 +896,9 @@ impl Engine {
             report.note("domain expansion is not active");
             return Ok(report);
         };
-        let layer_names: Vec<String> = st.layers.iter().map(|l| l.bookmark.clone()).collect();
-        if !layer_names.is_empty() {
-            self.vcs.transaction(&mut |tx| {
-                for name in &layer_names {
-                    tx.forget_bookmark(name)?;
-                }
-                Ok(())
-            })?;
-            for name in &layer_names {
-                self.state.branches.remove(name);
-            }
-            self.state.save(&self.root)?;
-        }
+        let n = self.forget_layer_bookmarks(&st.layers).await?;
         ExpansionState::remove(&self.root)?;
-        report.note(format!(
-            "domain expansion deactivated; forgot {} layer bookmark(s)",
-            layer_names.len()
-        ));
+        report.note(format!("domain expansion deactivated; forgot {n} layer bookmark(s)"));
         report.note(format!("your work is intact on '{}'", st.monolith));
         Ok(report)
     }

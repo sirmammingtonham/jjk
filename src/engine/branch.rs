@@ -198,6 +198,26 @@ impl Engine {
     /// `jjk undo` restores everything. Prompts for confirmation unless `assume_yes`.
     pub async fn stack_drop(&mut self, assume_yes: bool) -> Result<Report> {
         let mut report = Report::default();
+
+        // In Domain Expansion mode the "stack" is the generated layer bookmarks — a parallel chain
+        // off trunk, not in `@`'s ancestry — so the tracked-branch scan below would find nothing
+        // ("no tracked branches in the stack to drop"). Dropping the stack here means discarding
+        // those generated layers; domain mode stays active (so a re-split rebuilds them) and the
+        // monolith keeps all the work, so it's non-destructive. `domain collapse` is the deactivate.
+        if crate::engine::expansion::ExpansionState::load(&self.root)?.is_some() {
+            if !assume_yes {
+                let prompt = "Drop the generated Domain Expansion stack? The layer bookmarks are \
+                    forgotten (domain mode stays active and your work stays intact on the monolith); \
+                    re-run `jjk domain split` to rebuild, or `jjk domain collapse` to turn the mode \
+                    off.";
+                if !self.prompter.confirm(prompt, false)? {
+                    report.note("aborted — nothing dropped");
+                    return Ok(report);
+                }
+            }
+            return self.domain_drop_stack().await;
+        }
+
         self.ensure_fresh(&mut report).await?;
         let stack = self.derive_stack().await?;
         let names: Vec<String> = stack
