@@ -201,8 +201,9 @@ aborts rather than risk dropping work.
 
 ## Model & effort
 
-The splitter is cheap by design — the LLM works on a compressed, code-free *sketch* (one-line gists
-plus dependency hints), and pulls full diffs for specific atoms only when it needs to.
+The splitter is cheap by design — the LLM works on a compressed, code-free *catalog* (one dense line
+per atom: kind, path, lines added/removed, and the symbols it defines, plus cross-file dependency
+hints), and pulls full diffs for specific atoms only when it needs to.
 
 Model and thinking effort **adapt to the changeset size** and are easy to override when a tough split
 wants more horsepower:
@@ -244,10 +245,15 @@ real use.
 ## Turning it off
 
 ```bash
-jjk domain collapse    # forget the jjk/layer/* branches; your monolith is untouched
+jjk domain collapse    # forget the jjk/layer/* branches AND turn the mode off; monolith untouched
+jjk stack drop         # forget the generated layers but STAY in domain mode (re-split to rebuild)
 ```
 
-`jjk undo` also reverts a `domain expansion`/`expand`/`collapse` as one unit (the mode state is
+Both leave your work intact on the monolith. The difference is the mode: `jjk stack drop` is a
+non-destructive reset of the proposed PRs — domain mode stays active, so the next `jjk domain
+split`/`submit` rebuilds the stack from scratch — whereas `jjk domain collapse` turns the mode off
+entirely. `jjk undo` also reverts a `domain expansion`/`expand`/`collapse` as one unit (the mode
+state is
 snapshotted alongside jj's, so they never drift).
 
 ## Under the hood
@@ -258,8 +264,9 @@ For the curious — you don't need any of this to use it:
    or a whole add/delete/rename/binary), each with a stable content hash. Because a modified file is
    per-hunk, **the same file's changes can be split across different layers** — the patch-subset
    applier reconstructs each layer's version of the file — as long as the hunks are independent.
-2. **Sketch.** A dependency graph (def→use, co-change, same-file) annotates the atoms. This is
-   *advisory* — it makes the LLM's job cheap and well-informed; it does not pre-decide the split.
+2. **Sketch.** Cross-file def→use dependency hints annotate the atoms (same-file affinity is
+   implicit — every atom carries its path, so it isn't spent as a separate hint). This is *advisory*
+   — it makes the LLM's job cheap and well-informed; it does not pre-decide the split.
 3. **Split.** The LLM groups atoms into ordered layers and names them. The engine validates only that
    every atom is placed exactly once (strays go to the remainder) — it never re-clusters.
 4. **Reconstruct.** Layers are built as a chain of branches (named after the monolith's prefix) off
@@ -271,7 +278,7 @@ For the curious — you don't need any of this to use it:
 
 Only a **very** large changeset triggers this — past ~200 change-atoms (i.e. hundreds of hunks).
 Below that the whole changeset goes to the model in a single holistic call; an atom is a one-line
-gist, so even a couple hundred of them is a few thousand tokens. When it does kick in, jjk buckets
+catalog entry, so even a couple hundred of them is a few thousand tokens. When it does kick in, jjk buckets
 independent components and splits each separately, so no single call carries the whole catalog.
 
 ## Limitations

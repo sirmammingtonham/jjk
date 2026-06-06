@@ -45,7 +45,7 @@ description: Every jjk command at a glance.
 | `jjk branch fold` | Fold the current branch into its downstack base (one fewer PR). |
 | `jjk branch split <new> <commit>` | Split the current branch at `<commit>` into two branches (`<new>` takes the lower commits). |
 | `jjk track [name]` / `jjk untrack [name]` | Toggle whether a branch is part of the stack / gets a PR. Defaults to the current branch. Keeps the commits. |
-| `jjk stack drop` | Remove the **whole local stack**: abandon every tracked branch's commits and heal back to trunk. For cleaning up after the stack's changes already landed via another PR. The remote is untouched; `jjk undo` restores it. Prompts unless `-y`/`--yes`. |
+| `jjk stack drop` | Remove the **whole local stack**: abandon every tracked branch's commits and heal back to trunk. For cleaning up after the stack's changes already landed via another PR. The remote is untouched; `jjk undo` restores it. Prompts unless `-y`/`--yes`. In **Domain Expansion** mode it drops the generated layer stack instead — **domain mode stays active** (re-split to rebuild) and the monolith is kept; use `jjk domain collapse` to also turn the mode off. |
 | `jjk restack` | Re-parent the upstack onto its bases. Usually a no-op (jj auto-rebases). |
 | `jjk up` / `jjk down` | Move one branch away from / toward trunk. Carries any uncommitted changes along. |
 | `jjk top` / `jjk bottom` / `jjk trunk` | Jump to the top / bottom of the stack, or to trunk. Carries any uncommitted changes along. |
