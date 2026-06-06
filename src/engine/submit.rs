@@ -185,7 +185,9 @@ impl Engine {
             .iter()
             .filter_map(|(name, pr)| self.state.nav_comment_of(name).map(|cid| (*pr, cid)))
             .collect();
-        let touched = self.upsert_nav_comments(stack_prs, yuji, &known).await?;
+        // When expansion is active this stack was auto-split from a monolith — note it subtly.
+        let domain = ExpansionState::load(&self.root)?.is_some();
+        let touched = self.upsert_nav_comments(stack_prs, yuji, domain, &known).await?;
         if touched.is_empty() {
             return Ok(0);
         }
@@ -212,6 +214,7 @@ impl Engine {
         &self,
         prs: &[(String, u64)],
         yuji: bool,
+        domain: bool,
         known: &std::collections::HashMap<u64, u64>,
     ) -> Result<Vec<(u64, u64)>> {
         if prs.len() < 2 {
@@ -220,7 +223,7 @@ impl Engine {
         let forge = self.forge().await?;
         let tasks = prs.iter().enumerate().map(|(idx, (_, pr))| {
             let pr = *pr;
-            let body = nav_comment_body(prs, idx, yuji);
+            let body = nav_comment_body(prs, idx, yuji, domain);
             let known_id = known.get(&pr).copied();
             async move {
                 // Fast path: edit the comment we already know about. If that fails (e.g. the author
@@ -249,8 +252,9 @@ const NAV_MARKER: &str = "<!-- jjk:nav -->";
 
 /// Build the stack-navigation comment for the PR at `current_idx` in `prs` (bottom→top). The PR
 /// numbers expand into GitHub's rich previews on their own, so we list just `#N`; a prominent
-/// footer shows this PR's position (`x/N`) and links jjk.
-fn nav_comment_body(prs: &[(String, u64)], current_idx: usize, yuji: bool) -> String {
+/// footer shows this PR's position (`x/N`) and links jjk. When `domain`, the footer also notes the
+/// stack was auto-split from one branch with Domain Expansion (subtle, just a trailing clause).
+fn nav_comment_body(prs: &[(String, u64)], current_idx: usize, yuji: bool, domain: bool) -> String {
     let n = prs.len();
     let mut s = format!("**🥞 This change is part of the following stack · PR {}/{}**\n\n", current_idx + 1, n);
     for (i, (_branch, pr)) in prs.iter().enumerate() {
@@ -258,7 +262,11 @@ fn nav_comment_body(prs: &[(String, u64)], current_idx: usize, yuji: bool) -> St
         let marker = if i == current_idx { " ◀" } else { "" };
         s.push_str(&format!("{indent}- #{pr}{marker}\n"));
     }
-    s.push_str("\nManaged by [jjk](https://github.com/sirmammingtonham/jjk).\n");
+    s.push_str("\nManaged by [jjk](https://github.com/sirmammingtonham/jjk)");
+    if domain {
+        s.push_str(" · split automatically with [Domain Expansion](https://ethan.website/jjk/domain-expansion)");
+    }
+    s.push_str(".\n");
     if yuji {
         s.push('\n');
         s.push_str(YUJI_FLOURISH);
